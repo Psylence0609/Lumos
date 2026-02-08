@@ -10,7 +10,13 @@ const TITLE_TEXT = "Lumos";
 const YELLOW = "#facc15";   // front part
 const WINE_RED = "#722f37";  // back part
 
-export function LumosTitle({ className }: { className?: string }) {
+export function LumosTitle({
+  className,
+  size = "default",
+}: {
+  className?: string;
+  size?: "default" | "hero";
+}) {
   const titleRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
@@ -61,7 +67,12 @@ export function LumosTitle({ className }: { className?: string }) {
     >
       <h1
         ref={titleRef}
-        className="lumos-title-text font-lumos text-3xl sm:text-4xl md:text-5xl font-bold tracking-tight text-center"
+        className={cn(
+          "lumos-title-text font-lumos font-bold tracking-tight text-center",
+          size === "hero"
+            ? "text-6xl sm:text-7xl md:text-8xl"
+            : "text-3xl sm:text-4xl md:text-5xl"
+        )}
         style={{ transformStyle: "preserve-3d" }}
         aria-label={TITLE_TEXT}
       />

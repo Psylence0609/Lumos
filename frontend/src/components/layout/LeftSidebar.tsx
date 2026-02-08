@@ -6,7 +6,7 @@ import { Home, LayoutGrid, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems: Array<{ to: string; icon: typeof Home; label: string; isLogout?: boolean }> = [
-  { to: "/", icon: Home, label: "Dashboard" },
+  { to: "/dashboard", icon: Home, label: "Dashboard" },
   { to: "/patterns", icon: LayoutGrid, label: "Patterns" },
   { to: "#", icon: LogOut, label: "Logout", isLogout: true },
 ];
