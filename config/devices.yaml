@@ -1,0 +1,207 @@
+# Smart Home Device Registry
+# Defines all simulated IoT devices in the home
+
+rooms:
+  living_room:
+    display_name: "Living Room"
+    devices:
+      - id: "light_living_main"
+        type: "light"
+        display_name: "Main Light"
+        capabilities: ["on", "off", "dim", "color"]
+        energy_profile:
+          idle_watts: 0.5
+          active_watts: 10.0
+        priority_tier: "medium"
+        negotiation_flexibility: 0.8
+
+      - id: "light_living_ambient"
+        type: "light"
+        display_name: "Ambient Light"
+        capabilities: ["on", "off", "dim", "color"]
+        energy_profile:
+          idle_watts: 0.3
+          active_watts: 5.0
+        priority_tier: "low"
+        negotiation_flexibility: 0.9
+
+      - id: "thermostat_living"
+        type: "thermostat"
+        display_name: "Thermostat"
+        capabilities: ["set_temperature", "set_mode", "eco_mode"]
+        energy_profile:
+          idle_watts: 5.0
+          active_watts: 1500.0
+        priority_tier: "high"
+        negotiation_flexibility: 0.3
+
+      - id: "plug_living_tv"
+        type: "smart_plug"
+        display_name: "TV Smart Plug"
+        capabilities: ["on", "off", "monitor"]
+        energy_profile:
+          idle_watts: 0.5
+          active_watts: 120.0
+        priority_tier: "low"
+        negotiation_flexibility: 0.9
+
+      - id: "sensor_living_motion"
+        type: "sensor"
+        sensor_type: "motion"
+        display_name: "Motion Sensor"
+        capabilities: ["detect"]
+        energy_profile:
+          idle_watts: 0.1
+          active_watts: 0.2
+        priority_tier: "medium"
+        negotiation_flexibility: 0.0
+
+  bedroom:
+    display_name: "Bedroom"
+    devices:
+      - id: "light_bedroom_main"
+        type: "light"
+        display_name: "Main Light"
+        capabilities: ["on", "off", "dim", "color"]
+        energy_profile:
+          idle_watts: 0.5
+          active_watts: 8.0
+        priority_tier: "medium"
+        negotiation_flexibility: 0.8
+
+      - id: "light_bedroom_nightstand"
+        type: "light"
+        display_name: "Nightstand Light"
+        capabilities: ["on", "off", "dim"]
+        energy_profile:
+          idle_watts: 0.2
+          active_watts: 3.0
+        priority_tier: "low"
+        negotiation_flexibility: 0.9
+
+      - id: "thermostat_bedroom"
+        type: "thermostat"
+        display_name: "Thermostat"
+        capabilities: ["set_temperature", "set_mode", "eco_mode"]
+        energy_profile:
+          idle_watts: 5.0
+          active_watts: 1200.0
+        priority_tier: "high"
+        negotiation_flexibility: 0.3
+
+      - id: "sensor_bedroom_temp"
+        type: "sensor"
+        sensor_type: "temperature"
+        display_name: "Temperature Sensor"
+        capabilities: ["read"]
+        energy_profile:
+          idle_watts: 0.05
+          active_watts: 0.1
+        priority_tier: "medium"
+        negotiation_flexibility: 0.0
+
+  kitchen:
+    display_name: "Kitchen"
+    devices:
+      - id: "light_kitchen_main"
+        type: "light"
+        display_name: "Main Light"
+        capabilities: ["on", "off", "dim"]
+        energy_profile:
+          idle_watts: 0.5
+          active_watts: 12.0
+        priority_tier: "medium"
+        negotiation_flexibility: 0.7
+
+      - id: "coffee_maker"
+        type: "coffee_maker"
+        display_name: "Coffee Maker"
+        capabilities: ["brew", "off", "schedule", "keep_warm"]
+        energy_profile:
+          idle_watts: 1.0
+          active_watts: 900.0
+        priority_tier: "low"
+        negotiation_flexibility: 0.9
+
+      - id: "plug_kitchen_fridge"
+        type: "smart_plug"
+        display_name: "Fridge Smart Plug"
+        capabilities: ["on", "off", "monitor"]
+        energy_profile:
+          idle_watts: 2.0
+          active_watts: 150.0
+        priority_tier: "critical"
+        negotiation_flexibility: 0.0
+
+      - id: "sensor_kitchen_temp"
+        type: "sensor"
+        sensor_type: "temperature"
+        display_name: "Temperature Sensor"
+        capabilities: ["read"]
+        energy_profile:
+          idle_watts: 0.05
+          active_watts: 0.1
+        priority_tier: "medium"
+        negotiation_flexibility: 0.0
+
+  office:
+    display_name: "Office"
+    devices:
+      - id: "light_office_main"
+        type: "light"
+        display_name: "Desk Light"
+        capabilities: ["on", "off", "dim", "color"]
+        energy_profile:
+          idle_watts: 0.5
+          active_watts: 10.0
+        priority_tier: "medium"
+        negotiation_flexibility: 0.7
+
+      - id: "plug_office_computer"
+        type: "smart_plug"
+        display_name: "Computer Plug"
+        capabilities: ["on", "off", "monitor"]
+        energy_profile:
+          idle_watts: 5.0
+          active_watts: 300.0
+        priority_tier: "medium"
+        negotiation_flexibility: 0.5
+
+      - id: "sensor_office_motion"
+        type: "sensor"
+        sensor_type: "motion"
+        display_name: "Motion Sensor"
+        capabilities: ["detect"]
+        energy_profile:
+          idle_watts: 0.1
+          active_watts: 0.2
+        priority_tier: "medium"
+        negotiation_flexibility: 0.0
+
+  front_door:
+    display_name: "Front Door"
+    devices:
+      - id: "lock_front_door"
+        type: "lock"
+        display_name: "Smart Lock"
+        capabilities: ["lock", "unlock", "status"]
+        energy_profile:
+          idle_watts: 0.1
+          active_watts: 2.0
+        priority_tier: "critical"
+        negotiation_flexibility: 0.0
+
+  energy_system:
+    display_name: "Energy System"
+    devices:
+      - id: "battery_main"
+        type: "battery"
+        display_name: "Home Battery"
+        capabilities: ["charge", "discharge", "status", "set_mode"]
+        energy_profile:
+          idle_watts: 10.0
+          active_watts: 5000.0
+        priority_tier: "critical"
+        negotiation_flexibility: 0.0
+        battery_capacity_kwh: 13.5
+        solar_panel_watts: 5000

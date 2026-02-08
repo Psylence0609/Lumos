@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+.chroma/
+*.db
+node_modules/
+frontend/dist/
+.cursor/
+*.docx
+certs/
+token.json
