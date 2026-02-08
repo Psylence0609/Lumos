@@ -108,7 +108,8 @@ export function useSpeechRecognition(
       if (interim) {
         onInterimRef.current?.(fullText);
       }
-      if (final) {
+      // For hold-to-talk (continuous: false), only send result on release (in onend), not on every final chunk
+      if (continuous && final) {
         onResultRef.current?.(finalTranscriptRef.current.trim());
       }
     };
@@ -126,9 +127,12 @@ export function useSpeechRecognition(
 
     recognition.onend = () => {
       setIsListening(false);
-      // In non-continuous mode, fire onResult with whatever we got
-      if (!continuous && finalTranscriptRef.current.trim()) {
-        onResultRef.current?.(finalTranscriptRef.current.trim());
+      // Hold-to-talk: send accumulated transcript only when user releases (stop() was called)
+      if (!continuous) {
+        const text = finalTranscriptRef.current.trim();
+        if (text) {
+          onResultRef.current?.(text);
+        }
       }
     };
 

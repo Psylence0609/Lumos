@@ -1,5 +1,6 @@
-import { useState, useCallback, useEffect } from "react";
-import { motion } from "framer-motion";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { createLayout, stagger } from "animejs";
 import { Home, Send, Wifi, WifiOff } from "lucide-react";
 import { DeviceCard } from "@/components/home/DeviceCard";
 import { ThreatBanner } from "@/components/home/ThreatBanner";
@@ -23,6 +24,14 @@ const ROOM_LABELS: Record<string, string> = {
   energy_system: "Energy System",
 };
 
+/* inject keyframes — transform/opacity only for 60fps compositor */
+const cssId = "dash-anim-css";
+const css = `
+@keyframes dash-dot { 0%,80%,100%{transform:scale(0.6) translateZ(0);opacity:0.3} 40%{transform:scale(1) translateZ(0);opacity:1} }
+@keyframes dash-wifi { 0%,100%{transform:scale(0.95) translateZ(0);opacity:0.5} 50%{transform:scale(1.05) translateZ(0);opacity:1} }
+@keyframes dash-glow { 0%,100%{box-shadow:0 0 0 rgba(139,92,246,0)} 50%{box-shadow:0 0 12px rgba(139,92,246,0.25)} }
+`;
+
 export default function Dashboard() {
   const [rooms, setRooms] = useState<Record<string, RoomDevices>>({});
   const [energy, setEnergy] = useState<EnergyData | null>(null);
@@ -32,6 +41,26 @@ export default function Dashboard() {
   const [patterns, setPatterns] = useState<Pattern[]>([]);
   const [command, setCommand] = useState("");
   const [commandLoading, setCommandLoading] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
+  const roomsContainerRef = useRef<HTMLDivElement>(null);
+  const layoutRef = useRef<ReturnType<typeof createLayout> | null>(null);
+  const prevLayoutKeyRef = useRef<string>("");
+
+  /** Stable key for grid structure: when this changes we run layout.animate() */
+  const getLayoutKey = useCallback((r: Record<string, RoomDevices>) => {
+    return Object.entries(r)
+      .map(([roomId, roomData]) => `${roomId}:${roomData.devices.map((d) => d.device_id).join(",")}`)
+      .join("|");
+  }, []);
+
+  /* inject CSS */
+  useEffect(() => {
+    if (document.getElementById(cssId)) return;
+    const s = document.createElement("style");
+    s.id = cssId;
+    s.textContent = css;
+    document.head.appendChild(s);
+  }, []);
 
   // Initial data fetch
   useEffect(() => {
@@ -55,6 +84,50 @@ export default function Dashboard() {
     const id = setInterval(load, 10000);
     return () => clearInterval(id);
   }, []);
+
+  /* anime.js Layout: animate grid when rooms or device list changes (record → React re-render → animate) */
+  useEffect(() => {
+    const root = roomsContainerRef.current;
+    if (!root) return;
+
+    const layoutKey = getLayoutKey(rooms);
+    if (layoutKey === "") return;
+
+    if (!layoutRef.current) {
+      layoutRef.current = createLayout(root, {
+        duration: 500,
+        ease: "out(4)",
+        delay: stagger(40, { from: "first" }),
+        enterFrom: {
+          opacity: 0,
+          transform: "translateY(14px) scale(0.99) translateZ(0)",
+          duration: 420,
+          ease: "out(4)",
+        },
+        leaveTo: {
+          opacity: 0,
+          transform: "translateY(-6px) scale(0.99) translateZ(0)",
+          duration: 320,
+          ease: "in(3)",
+        },
+      });
+      layoutRef.current.record();
+      prevLayoutKeyRef.current = layoutKey;
+      return;
+    }
+
+    if (layoutKey === prevLayoutKeyRef.current) return;
+    prevLayoutKeyRef.current = layoutKey;
+
+    layoutRef.current.animate({
+      duration: 500,
+      ease: "out(4)",
+      delay: stagger(40, { from: "first" }),
+      onComplete: () => {
+        layoutRef.current?.record();
+      },
+    });
+  }, [rooms, getLayoutKey]);
 
   // WebSocket handlers
   const { connected } = useWebSocket({
@@ -106,7 +179,6 @@ export default function Dashboard() {
       } else {
         setCommandFeedback(null);
       }
-      // Audio feedback (for voice) and alerts are handled via WebSocket voice_alert events
       if (!text) setCommand("");
     } catch (e) {
       console.error("Command failed:", e);
@@ -120,77 +192,122 @@ export default function Dashboard() {
   }, []);
 
   return (
-    <div className="min-h-screen p-4 md:p-6 max-w-7xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <Home className="w-5 h-5 text-primary" />
-          <h1 className="text-lg font-bold">Smart Home</h1>
+    <div className="min-h-screen px-3 py-4 sm:p-4 md:p-6 max-w-7xl mx-auto">
+      {/* Header — compact on mobile */}
+      <div className="flex items-center justify-between gap-2 mb-4 sm:mb-6">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <Home className="w-5 h-5 shrink-0 text-primary" />
+          <h1 className="text-base sm:text-lg font-bold truncate">Smart Home</h1>
         </div>
-        <Badge variant={connected ? "success" : "destructive"} className="gap-1">
-          {connected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-          {connected ? "Live" : "Disconnected"}
+        <Badge variant={connected ? "success" : "destructive"} className="gap-1 shrink-0 text-xs">
+          {connected ? (
+            <span style={{ animation: "dash-wifi 2s ease-in-out infinite", display: "inline-flex" }}>
+              <Wifi className="w-3 h-3" />
+            </span>
+          ) : (
+            <WifiOff className="w-3 h-3" />
+          )}
+          <span className="hidden sm:inline">{connected ? "Live" : "Disconnected"}</span>
         </Badge>
       </div>
 
       {/* Threat Banner */}
-      <div className="mb-6">
+      <div className="mb-4 sm:mb-6">
         <ThreatBanner threat={threat} />
       </div>
 
-      {/* Command Bar */}
-      <div className="flex gap-2 mb-6">
+      {/* Command Bar — full width on mobile, 44px touch targets; stacks on narrow screens */}
+      <div className="flex flex-col sm:flex-row gap-2 mb-4 sm:mb-6">
         <input
           type="text"
           value={command}
           onChange={(e) => setCommand(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && sendCommand()}
-          placeholder='Ask anything... "Turn off all lights" or hold 🎤 to speak'
-          className="flex-1 h-9 px-3 text-sm bg-muted border border-border rounded-md placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-ring"
+          onFocus={() => setInputFocused(true)}
+          onBlur={() => setInputFocused(false)}
+          placeholder='Ask anything... or hold 🎤'
+          className="flex-1 min-w-0 min-h-[44px] sm:min-h-0 h-10 sm:h-9 px-3 text-sm bg-muted border border-border rounded-md placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-ring transition-shadow duration-300 smooth-transition"
+          style={inputFocused ? { animation: "dash-glow 1.5s ease-in-out infinite" } : undefined}
         />
-        <Button size="default" onClick={() => sendCommand()} disabled={commandLoading}>
-          <Send className="w-4 h-4" />
-        </Button>
-        <VoiceChatButton
-          onTranscript={handleVoiceTranscript}
-          disabled={commandLoading}
-          compact
-        />
+        <div className="flex gap-2 shrink-0">
+          <Button size="default" className="min-h-[44px] sm:min-h-0 h-11 sm:h-9 min-w-[44px] flex-1 sm:flex-initial" onClick={() => sendCommand()} disabled={commandLoading}>
+            <Send className="w-4 h-4" />
+          </Button>
+          <VoiceChatButton
+            onTranscript={handleVoiceTranscript}
+            disabled={commandLoading}
+            compact
+          />
+        </div>
       </div>
 
-      {/* Feedback message when command is not understood */}
-      {commandFeedback && (
-        <div className="mb-4 p-3 rounded-md bg-yellow-500/10 border border-yellow-500/30 text-yellow-200 text-sm flex items-center gap-2">
-          <span>⚠️</span>
-          <span>{commandFeedback}</span>
-          <button onClick={() => setCommandFeedback(null)} className="ml-auto text-yellow-400 hover:text-yellow-200 text-xs">✕</button>
-        </div>
-      )}
+      {/* Typing indicator dots */}
+      <AnimatePresence>
+        {commandLoading && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.35, ease: [0.33, 1, 0.68, 1] }}
+            className="flex items-center gap-1.5 mb-4 pl-1"
+          >
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="w-1.5 h-1.5 rounded-full bg-primary/60"
+                style={{ animation: `dash-dot 1.2s ${i * 0.15}s ease-in-out infinite` }}
+              />
+            ))}
+            <span className="text-[10px] text-muted-foreground ml-1">Processing…</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* Devices Grid (3 columns) */}
-        <div className="lg:col-span-3 space-y-6">
+      {/* Feedback message — slide-in from left */}
+      <AnimatePresence>
+        {commandFeedback && (
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.35, ease: [0.33, 1, 0.68, 1] }}
+            className="mb-4 p-3 rounded-md bg-yellow-500/10 border border-yellow-500/30 text-yellow-200 text-sm flex items-center gap-2"
+          >
+            <span>⚠️</span>
+            <span>{commandFeedback}</span>
+            <button onClick={() => setCommandFeedback(null)} className="ml-auto text-yellow-400 hover:text-yellow-200 text-xs">✕</button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Mobile: sidebar widgets as horizontal scrollable strip — narrow cards on small phones */}
+      <div className="lg:hidden mb-4 sm:mb-6 -mx-3 sm:-mx-4 px-3 sm:px-4">
+        <div className="flex gap-2 sm:gap-3 overflow-x-auto pb-3 snap-x snap-mandatory scrollbar-hide -webkit-overflow-scrolling-touch">
+          <div className="min-w-[260px] sm:min-w-[280px] max-w-[85vw] sm:max-w-[320px] snap-start shrink-0"><EnergyWidget energy={energy} /></div>
+          <div className="min-w-[260px] sm:min-w-[280px] max-w-[85vw] sm:max-w-[320px] snap-start shrink-0"><PatternPanel patterns={patterns} onUpdate={() => apiFetch<Pattern[]>("/patterns").then(setPatterns)} /></div>
+          <div className="min-w-[260px] sm:min-w-[280px] max-w-[85vw] sm:max-w-[320px] snap-start shrink-0"><AgentActivity agents={agents} /></div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 sm:gap-6">
+        {/* Devices Grid — 2 cols on xs (bigger touch), 3 sm, 4 md+ */}
+        <div ref={roomsContainerRef} className="layout-animate-root lg:col-span-3 space-y-4 sm:space-y-6">
           {Object.entries(rooms).map(([roomId, roomData]) => (
-            <motion.div
-              key={roomId}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3 }}
-            >
-              <h2 className="text-sm font-semibold text-muted-foreground mb-3">
+            <div key={roomId} data-room={roomId}>
+              <h2 className="text-xs sm:text-sm font-semibold text-muted-foreground mb-2 sm:mb-3">
                 {ROOM_LABELS[roomId] || roomId}
               </h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 sm:gap-3">
                 {roomData.devices.map((device) => (
                   <DeviceCard key={device.device_id} device={device} />
                 ))}
               </div>
-            </motion.div>
+            </div>
           ))}
         </div>
 
-        {/* Sidebar (1 column) */}
-        <div className="space-y-4">
+        {/* Sidebar (1 column) — hidden on mobile (shown above as scroll strip) */}
+        <div className="hidden lg:block space-y-4">
           <EnergyWidget energy={energy} />
           <PatternPanel patterns={patterns} onUpdate={() => apiFetch<Pattern[]>("/patterns").then(setPatterns)} />
           <AgentActivity agents={agents} />
