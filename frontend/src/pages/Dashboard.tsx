@@ -1,21 +1,20 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { createLayout, stagger } from "animejs";
-import { Home, Send, Wifi, WifiOff } from "lucide-react";
+import { Send, Wifi, WifiOff } from "lucide-react";
 import { DeviceCard } from "@/components/home/DeviceCard";
 import { ThreatBanner } from "@/components/home/ThreatBanner";
 import { EnergyWidget } from "@/components/home/EnergyWidget";
 import { VoiceAlert } from "@/components/home/VoiceAlert";
-import { PatternPanel } from "@/components/home/PatternPanel";
-import { AgentActivity } from "@/components/home/AgentActivity";
 import { VoiceChatButton } from "@/components/home/VoiceChatButton";
+import { LumosTitle } from "@/components/home/LumosTitle";
 import { TimelineOverlay } from "@/components/sim/TimelineOverlay";
 import { MetricsPanel } from "@/components/sim/MetricsPanel";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { apiFetch } from "@/lib/utils";
-import type { DeviceState, EnergyData, ThreatAssessment, AgentInfo, VoiceAlert as VoiceAlertType, Pattern, RoomDevices, ScenarioStep } from "@/types";
+import type { DeviceState, EnergyData, ThreatAssessment, VoiceAlert as VoiceAlertType, RoomDevices, ScenarioStep } from "@/types";
 
 const ROOM_LABELS: Record<string, string> = {
   living_room: "Living Room",
@@ -39,9 +38,7 @@ export default function Dashboard() {
   const [rooms, setRooms] = useState<Record<string, RoomDevices>>({});
   const [energy, setEnergy] = useState<EnergyData | null>(null);
   const [threat, setThreat] = useState<ThreatAssessment | null>(null);
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [voiceAlert, setVoiceAlert] = useState<VoiceAlertType | null>(null);
-  const [patterns, setPatterns] = useState<Pattern[]>([]);
   const [command, setCommand] = useState("");
   const [commandLoading, setCommandLoading] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
@@ -76,16 +73,12 @@ export default function Dashboard() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [devData, enData, agData, ptData] = await Promise.all([
+        const [devData, enData] = await Promise.all([
           apiFetch<Record<string, RoomDevices>>("/devices"),
           apiFetch<EnergyData>("/devices/energy"),
-          apiFetch<AgentInfo[]>("/agents"),
-          apiFetch<Pattern[]>("/patterns"),
         ]);
         setRooms(devData);
         setEnergy(enData);
-        setAgents(agData);
-        setPatterns(ptData);
       } catch (e) {
         console.error("Initial load failed:", e);
       }
@@ -144,7 +137,6 @@ export default function Dashboard() {
     initial_state: useCallback((msg: any) => {
       if (msg.data.devices) setRooms(msg.data.devices);
       if (msg.data.energy) setEnergy(msg.data.energy);
-      if (msg.data.agents) setAgents(msg.data.agents);
     }, []),
     device_state: useCallback((msg: any) => {
       const device: DeviceState = msg.data;
@@ -164,12 +156,6 @@ export default function Dashboard() {
     energy_summary: useCallback((msg: any) => setEnergy(msg.data), []),
     threat_assessment: useCallback((msg: any) => setThreat(msg.data), []),
     voice_alert: useCallback((msg: any) => setVoiceAlert(msg.data), []),
-    agent_action: useCallback(() => {
-      apiFetch<AgentInfo[]>("/agents").then(setAgents).catch(() => {});
-    }, []),
-    pattern_suggestion: useCallback(() => {
-      apiFetch<Pattern[]>("/patterns").then(setPatterns).catch(() => {});
-    }, []),
     // Temporal scenario events
     scenario_active: useCallback((msg: any) => {
       if (msg.data.temporal) {
@@ -239,11 +225,10 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen px-3 py-4 sm:p-4 md:p-6 max-w-7xl mx-auto">
-      {/* Header — compact on mobile */}
+      {/* Header — title centred, status badge on right */}
       <div className="flex items-center justify-between gap-2 mb-4 sm:mb-6">
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <Home className="w-5 h-5 shrink-0 text-primary" />
-          <h1 className="text-base sm:text-lg font-bold truncate">Smart Home</h1>
+        <div className="flex-1 min-w-0 flex justify-center">
+          <LumosTitle />
         </div>
         <Badge variant={connected ? "success" : "destructive"} className="gap-1 shrink-0 text-xs">
           {connected ? (
@@ -343,9 +328,7 @@ export default function Dashboard() {
       {/* Mobile: sidebar widgets as horizontal scrollable strip — narrow cards on small phones */}
       <div className="lg:hidden mb-4 sm:mb-6 -mx-3 sm:-mx-4 px-3 sm:px-4">
         <div className="flex gap-2 sm:gap-3 overflow-x-auto pb-3 snap-x snap-mandatory scrollbar-hide -webkit-overflow-scrolling-touch">
-          <div className="min-w-[260px] sm:min-w-[280px] max-w-[85vw] sm:max-w-[320px] snap-start shrink-0"><EnergyWidget energy={energy} /></div>
-          <div className="min-w-[260px] sm:min-w-[280px] max-w-[85vw] sm:max-w-[320px] snap-start shrink-0"><PatternPanel patterns={patterns} onUpdate={() => apiFetch<Pattern[]>("/patterns").then(setPatterns)} /></div>
-          <div className="min-w-[260px] sm:min-w-[280px] max-w-[85vw] sm:max-w-[320px] snap-start shrink-0"><AgentActivity agents={agents} /></div>
+          <div className="min-w-[280px] sm:min-w-[300px] max-w-[85vw] sm:max-w-[340px] snap-start shrink-0"><EnergyWidget energy={energy} /></div>
         </div>
       </div>
 
@@ -354,7 +337,7 @@ export default function Dashboard() {
         <div ref={roomsContainerRef} className="layout-animate-root lg:col-span-3 space-y-4 sm:space-y-6">
           {Object.entries(rooms).map(([roomId, roomData]) => (
             <div key={roomId} data-room={roomId}>
-              <h2 className="text-xs sm:text-sm font-semibold text-muted-foreground mb-2 sm:mb-3">
+              <h2 className="text-xs sm:text-sm font-semibold mb-2 sm:mb-3" style={{ color: 'var(--color-room-label)' }}>
                 {ROOM_LABELS[roomId] || roomId}
               </h2>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 sm:gap-3">
@@ -369,8 +352,6 @@ export default function Dashboard() {
         {/* Sidebar (1 column) — hidden on mobile (shown above as scroll strip) */}
         <div className="hidden lg:block space-y-4">
           <EnergyWidget energy={energy} />
-          <PatternPanel patterns={patterns} onUpdate={() => apiFetch<Pattern[]>("/patterns").then(setPatterns)} />
-          <AgentActivity agents={agents} />
         </div>
       </div>
 

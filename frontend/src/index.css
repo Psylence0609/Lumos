@@ -1,17 +1,17 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background: #09090b;
+  --color-background: #252123;
   --color-foreground: #fafafa;
-  --color-card: #0c0c0f;
+  --color-card: #252123;
   --color-card-foreground: #fafafa;
-  --color-popover: #09090b;
+  --color-popover: #252123;
   --color-popover-foreground: #fafafa;
   --color-primary: #3b82f6;
   --color-primary-foreground: #fafafa;
   --color-secondary: #1e1e24;
   --color-secondary-foreground: #fafafa;
-  --color-muted: #18181b;
+  --color-muted: #252123;
   --color-muted-foreground: #a1a1aa;
   --color-accent: #1e1e24;
   --color-accent-foreground: #fafafa;
@@ -19,6 +19,8 @@
   --color-border: #27272a;
   --color-input: #27272a;
   --color-ring: #3b82f6;
+  --color-room-label: #32B3F1;
+  --color-device-type: #D5D3D1;
   --radius: 0.5rem;
 }
 
@@ -33,6 +35,11 @@ body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   /* Prevent overscroll / rubber-band on iOS */
   overscroll-behavior-y: none;
+}
+
+/* Lumos brand title font (Syne loaded via index.html) */
+.font-lumos {
+  font-family: 'Syne', system-ui, sans-serif;
 }
 
 /* Touch-friendly: allow tap highlight and smooth scroll on mobile */
@@ -61,4 +68,59 @@ body {
 }
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
+}
+
+/* Left sidebar — vertical buttons; hover enlarges; active page stays enlarged + highlighted, fixed and centred */
+.left-sidebar-nav {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4.5rem;
+  z-index: 30;
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: 0.5rem;
+  padding-top: 1em;
+  padding-bottom: 1em;
+  display: flex;
+  align-items: center;
+}
+
+.left-sidebar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.left-sidebar-item {
+  background: var(--color-secondary, #1e1e24);
+  color: var(--color-muted-foreground, #a1a1aa);
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease;
+  cursor: pointer;
+  border: none;
+  font: inherit;
+}
+
+.left-sidebar-item:hover {
+  transform: scale(1.1);
+  background: var(--color-primary, #3b82f6);
+  color: var(--color-primary-foreground, #fafafa);
+}
+
+/* Active page: stays enlarged and highlighted */
+.left-sidebar-item-active,
+.left-sidebar-item-active:hover {
+  transform: scale(1.1);
+  background: var(--color-primary, #3b82f6);
+  color: var(--color-primary-foreground, #fafafa);
 }

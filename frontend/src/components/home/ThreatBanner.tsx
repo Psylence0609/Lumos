@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { animate } from "animejs";
 import { AlertTriangle, Shield, ShieldAlert, ShieldCheck } from "lucide-react";
 import { cn, getThreatBg, getThreatColor } from "@/lib/utils";
 import type { ThreatAssessment } from "@/types";
@@ -37,18 +36,6 @@ export function ThreatBanner({ threat }: Props) {
     document.head.appendChild(s);
   }, []);
 
-  /* critical shake every 3s */
-  useEffect(() => {
-    if (!threat || threat.threat_level !== "critical" || !bannerRef.current) return;
-    const el = bannerRef.current;
-    const shake = () => {
-      animate(el, { translateX: [-3, 3, -3, 2, -1, 0], duration: 480, ease: "out(3)" });
-    };
-    shake();
-    const id = setInterval(shake, 3000);
-    return () => clearInterval(id);
-  }, [threat?.threat_level]);
-
   /* ── All Clear ── */
   if (!threat || threat.threat_level === "none") {
     return (
@@ -68,9 +55,9 @@ export function ThreatBanner({ threat }: Props) {
   const glowAnim = threat.threat_level === "critical" ? "tb-glow-critical"
     : threat.threat_level === "high" ? "tb-glow-high" : "tb-glow-medium";
 
-  const iconScale = threat.threat_level === "critical" ? [1, 1.35, 1]
+  const iconScale = threat.threat_level === "critical" ? 1
     : threat.threat_level === "high" ? [1, 1.2, 1] : [1, 1.1, 1];
-  const iconDur = threat.threat_level === "critical" ? 0.8 : 1.5;
+  const iconDur = threat.threat_level === "critical" ? 0 : 1.5;
 
   return (
     <AnimatePresence>
