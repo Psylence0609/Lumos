@@ -1,5 +1,6 @@
-import { BrowserRouter, Routes, Route, Outlet } from "react-router-dom";
+import { BrowserRouter, Navigate, Routes, Route, Outlet } from "react-router-dom";
 import { LeftSidebar } from "@/components/layout/LeftSidebar";
+import { useAuth } from "@/contexts/AuthContext";
 import Dashboard from "@/pages/Dashboard";
 import Patterns from "@/pages/Patterns";
 import SimDashboard from "@/pages/SimDashboard";
@@ -16,15 +17,23 @@ function Layout() {
   );
 }
 
+function ProtectedRoute() {
+  const { isAuthenticated } = useAuth();
+  if (!isAuthenticated) return <Navigate to="/" replace />;
+  return <Outlet />;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<LandingPage />} />
-        <Route element={<Layout />}>
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/patterns" element={<Patterns />} />
-          <Route path="/simulation" element={<SimDashboard />} />
+        <Route element={<ProtectedRoute />}>
+          <Route element={<Layout />}>
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/patterns" element={<Patterns />} />
+            <Route path="/simulation" element={<SimDashboard />} />
+          </Route>
         </Route>
       </Routes>
     </BrowserRouter>

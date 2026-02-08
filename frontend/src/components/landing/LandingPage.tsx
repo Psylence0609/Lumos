@@ -1,5 +1,7 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import { LumosTitle } from "@/components/home/LumosTitle";
+import { useAuth } from "@/contexts/AuthContext";
 import { BulbSection } from "@/components/landing/BulbSection";
 import { MoneySavedSection } from "@/components/landing/MoneySavedSection";
 import { NoiseBlobSection } from "@/components/landing/NoiseBlobSection";
@@ -10,6 +12,12 @@ const HERO_SCROLL_HEIGHT_VH = 700;
 export function LandingPage() {
   const containerRef = useRef<HTMLDivElement>(null);
   const heroScrollRef = useRef<HTMLDivElement>(null);
+  const { isAuthenticated } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (isAuthenticated) navigate("/dashboard", { replace: true });
+  }, [isAuthenticated, navigate]);
 
   return (
     <div

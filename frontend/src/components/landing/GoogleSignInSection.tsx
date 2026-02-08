@@ -1,17 +1,33 @@
 /**
- * Final landing section: circle with Google icon for sign-in (to be implemented later).
+ * Final landing section: circle with Google icon for sign-in.
  */
+import { useGoogleLogin } from "@react-oauth/google";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/contexts/AuthContext";
+
 export function GoogleSignInSection() {
+  const { setUser } = useAuth();
+  const navigate = useNavigate();
+
+  const login = useGoogleLogin({
+    flow: "implicit",
+    onSuccess: (tokenResponse) => {
+      setUser({
+        access_token: tokenResponse.access_token,
+        expires_in: tokenResponse.expires_in ?? 0,
+      });
+      navigate("/dashboard", { replace: true });
+    },
+  });
+
   return (
     <section className="min-h-screen flex flex-col items-center justify-center bg-background px-4">
       <p className="text-muted-foreground text-sm mb-8">Sign in to continue</p>
       <button
         type="button"
         className="w-16 h-16 rounded-full flex items-center justify-center bg-background border-2 border-border hover:border-primary hover:bg-secondary transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-background"
-        aria-label="Sign in with Google (coming soon)"
-        onClick={() => {
-          /* TODO: implement Google sign-in */
-        }}
+        aria-label="Sign in with Google"
+        onClick={() => login()}
       >
         <GoogleIcon className="w-8 h-8 text-foreground" />
       </button>

@@ -1,8 +1,9 @@
 /**
  * Left sidebar nav — three vertical icon buttons; hover enlarges; active page stays enlarged and highlighted.
  */
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Home, LayoutGrid, LogOut } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
 import { cn } from "@/lib/utils";
 
 const navItems: Array<{ to: string; icon: typeof Home; label: string; isLogout?: boolean }> = [
@@ -13,6 +14,8 @@ const navItems: Array<{ to: string; icon: typeof Home; label: string; isLogout?:
 
 export function LeftSidebar() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { logout } = useAuth();
 
   return (
     <nav
@@ -33,8 +36,8 @@ export function LeftSidebar() {
                   type="button"
                   className={className}
                   onClick={() => {
-                    /* TODO: wire to auth logout */
-                    window.location.href = "/";
+                    logout();
+                    navigate("/", { replace: true });
                   }}
                   aria-label={label}
                 >
