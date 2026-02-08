@@ -4,21 +4,18 @@
  * Audio rules:
  * - Audio ALWAYS auto-plays when an alert arrives (threats, voice responses, etc.)
  * - A "Replay" button appears after the first play (never a "Play" button).
- * - For permission-required alerts: STT auto-activates after audio finishes
- *   to listen for "yes" / "approve" / "no" / "deny".
- * - Falls back to Approve / Deny buttons if STT fails or is unsupported.
+ * - For permission-required alerts: user holds the mic button to speak their response.
+ *   The backend LLM parses intent (approve, deny, or partial instructions).
+ * - Falls back to Approve / Deny buttons for quick tap responses.
  * - Info-only alerts auto-dismiss after audio finishes (with a Dismiss button as fallback).
  */
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Volume2, Check, X, Mic, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/utils";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import type { VoiceAlert as VoiceAlertType } from "@/types";
-
-const APPROVE_WORDS = ["yes", "yeah", "yep", "approve", "approved", "go ahead", "do it", "sure", "okay", "ok"];
-const DENY_WORDS = ["no", "nah", "nope", "deny", "denied", "don't", "stop", "cancel"];
 
 /** How long (ms) to keep an info-only alert visible after audio finishes */
 const AUTO_DISMISS_DELAY = 4000;
@@ -103,9 +100,11 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
   const [hasPlayed, setHasPlayed] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isHolding, setIsHolding] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const hasAutoPlayed = useRef<string | null>(null);
   const autoDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestSttTextRef = useRef("");
 
   /* inject CSS */
   useEffect(() => {
@@ -116,11 +115,7 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     document.head.appendChild(s);
   }, []);
 
-  // --- STT for permission responses ---
-  // Use a ref so the hook can be called with a stable callback that forwards to the real handler
-  // (which needs isListening/stopListening from the hook)
-  const sttResultHandlerRef = useRef<(text: string) => void>(() => {});
-
+  // --- STT for hold-to-speak ---
   const {
     isSupported: sttSupported,
     isListening,
@@ -128,39 +123,21 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     stopListening,
   } = useSpeechRecognition({
     continuous: true,
-    onResult: (text) => sttResultHandlerRef.current(text),
-    onInterim: (text) => setSttText(text),
-    onError: () => setSttStatus("idle"),
-  });
-
-  const handleSttResult = useCallback(
-    (text: string) => {
-      if (!alert?.require_permission || responding) return;
-
-      if (errorMessage) setErrorMessage(null);
-
-      const trimmedText = text.trim();
-
-      if (trimmedText) {
-        setSttText(trimmedText);
-        setSttStatus("processing");
-        if (isListening) stopListening();
-
-        const lower = trimmedText.toLowerCase();
-        const isApprove = APPROVE_WORDS.some((w) => lower.includes(w));
-        const isDeny = DENY_WORDS.some((w) => lower.includes(w));
-        const approved = isApprove ? true : isDeny ? false : null;
-        handleResponse(approved, trimmedText);
-      } else {
-        setSttStatus("listening");
-      }
+    onResult: (text) => {
+      // Update accumulated text (fired by silence timeout in continuous mode)
+      latestSttTextRef.current = text;
+      setSttText(text);
     },
-    [alert?.require_permission, responding, errorMessage, isListening, stopListening]
-  );
-
-  useEffect(() => {
-    sttResultHandlerRef.current = handleSttResult;
-  }, [handleSttResult]);
+    onInterim: (text) => {
+      // Update text in real-time as user speaks
+      latestSttTextRef.current = text;
+      setSttText(text);
+    },
+    onError: () => {
+      setSttStatus("idle");
+      setIsHolding(false);
+    },
+  });
 
   // --- Auto-play audio when a new alert arrives ---
   useEffect(() => {
@@ -171,6 +148,8 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
       setHasPlayed(false);
       setErrorMessage(null);
       setIsPlaying(false);
+      setIsHolding(false);
+      latestSttTextRef.current = "";
       if (autoDismissTimer.current) {
         clearTimeout(autoDismissTimer.current);
         autoDismissTimer.current = null;
@@ -191,18 +170,15 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
 
       audioRef.current.onended = () => {
         setIsPlaying(false);
-        if (alert.require_permission && sttSupported) {
-          setSttStatus("listening");
-          startListening();
-        } else if (!alert.require_permission) {
+        // Info-only alerts: auto-dismiss after delay
+        if (!alert.require_permission) {
           autoDismissTimer.current = setTimeout(() => {
             onDismiss();
           }, AUTO_DISMISS_DELAY);
         }
+        // Permission-required alerts: wait for user to use hold-to-speak or buttons
+        // (no automatic listening)
       };
-    } else if (alert.require_permission && sttSupported) {
-      setSttStatus("listening");
-      startListening();
     } else if (!alert.require_permission && !alert.audio_base64) {
       autoDismissTimer.current = setTimeout(() => {
         onDismiss();
@@ -211,7 +187,7 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [alert?.alert_id]);
 
-  // Cleanup STT on dismiss
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (isListening) stopListening();
@@ -240,25 +216,24 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     setResponding(true);
     if (isListening) stopListening();
     setSttStatus("processing");
-    setErrorMessage(null); // Clear any previous error
+    setErrorMessage(null);
 
     try {
       const response = await apiFetch("/voice/permission", {
         method: "POST",
         body: JSON.stringify({
           alert_id: alert.alert_id,
-          approved: approved, // Can be null if inferred from userText
-          user_text: userText || sttText, // Send the natural language response
+          approved: approved,
+          user_text: userText,
           modifications: {},
         }),
       });
-      
+
       // Check if there's an error message from clarity check
       if (response.error_message) {
         setErrorMessage(response.error_message);
         setSttStatus("idle");
         setSttText("");
-        // Don't dismiss - let user see the error and try again
         setResponding(false);
         return;
       }
@@ -272,16 +247,35 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     setResponding(false);
     setSttStatus("idle");
     setSttText("");
+    latestSttTextRef.current = "";
     onDismiss();
   };
 
-  const toggleStt = () => {
-    if (isListening) {
-      stopListening();
-      setSttStatus("idle");
+  // --- Hold-to-speak handlers ---
+  const handleHoldStart = (e: React.PointerEvent) => {
+    e.preventDefault();
+    if (responding) return;
+    setIsHolding(true);
+    setSttStatus("listening");
+    setSttText("");
+    latestSttTextRef.current = "";
+    setErrorMessage(null);
+    startListening();
+  };
+
+  const handleHoldEnd = () => {
+    if (!isHolding) return;
+    setIsHolding(false);
+    if (isListening) stopListening();
+
+    const text = latestSttTextRef.current.trim();
+    if (text) {
+      setSttStatus("processing");
+      // Send with approved=null — the backend LLM determines intent
+      // (approve all, deny all, or specific instructions like "turn up the heating only")
+      handleResponse(null, text);
     } else {
-      setSttStatus("listening");
-      startListening();
+      setSttStatus("idle");
     }
   };
 
@@ -314,7 +308,7 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
             <span className="text-sm font-semibold">
               {alert.require_permission ? "Voice Alert" : "Smart Home"}
             </span>
-            {sttStatus === "listening" && (
+            {isHolding && (
               <motion.span
                 animate={{ opacity: [1, 0.4] }}
                 transition={{ repeat: Infinity, duration: 0.8 }}
@@ -341,8 +335,19 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
 
           <audio ref={audioRef} />
 
-          {/* Live STT transcript */}
-          {sttStatus === "listening" && sttText && (
+          {/* Error message */}
+          {errorMessage && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              className="mb-3 px-3 py-2 rounded-lg bg-red-950/30 border border-red-500/30"
+            >
+              <p className="text-xs text-red-300">{errorMessage}</p>
+            </motion.div>
+          )}
+
+          {/* Live STT transcript while holding the mic button */}
+          {isHolding && sttText && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
@@ -357,9 +362,27 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
                   |
                 </motion.span>
               </p>
-              <p className="text-[10px] text-zinc-500 mt-1">
-                Say <strong>"yes"</strong> to approve or <strong>"no"</strong> to deny
+            </motion.div>
+          )}
+
+          {/* Processing indicator */}
+          {sttStatus === "processing" && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="mb-3 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700"
+            >
+              <p className="text-xs text-zinc-400 flex items-center gap-2">
+                <motion.span
+                  animate={{ rotate: 360 }}
+                  transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                  className="inline-block w-3 h-3 border border-zinc-500 border-t-transparent rounded-full"
+                />
+                Processing your response…
               </p>
+              {sttText && (
+                <p className="text-xs text-zinc-300 italic mt-1">"{sttText}"</p>
+              )}
             </motion.div>
           )}
 
@@ -390,12 +413,20 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
                 <Button
                   variant="outline"
                   size="sm"
-                  className={`w-full text-xs ${isListening ? "border-red-500/50 text-red-400" : ""}`}
-                  onClick={toggleStt}
+                  className={`w-full text-xs select-none touch-none ${
+                    isHolding
+                      ? "border-red-500/50 text-red-400 bg-red-950/20"
+                      : ""
+                  }`}
+                  onPointerDown={handleHoldStart}
+                  onPointerUp={handleHoldEnd}
+                  onPointerLeave={handleHoldEnd}
+                  onPointerCancel={handleHoldEnd}
+                  onContextMenu={(e) => e.preventDefault()}
                   disabled={responding}
                 >
                   <Mic className="w-3.5 h-3.5 mr-1.5" />
-                  {isListening ? "Stop Listening" : "Respond by Voice"}
+                  {isHolding ? "Release to Send" : "Hold to Speak"}
                 </Button>
               )}
             </div>
