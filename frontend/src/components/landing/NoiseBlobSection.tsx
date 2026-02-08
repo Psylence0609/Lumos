@@ -1,6 +1,6 @@
 /**
- * Noise blob behind Lumos title. Scroll within the hero zone (700vh)
- * advances steps 1→7; then scroll continues to lamp.
+ * Noise blob behind Lumos title. Two scroll triggers advance through:
+ * 2 → (scroll) → 3 → auto 4 → (scroll) → 6
  */
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createNoise3D } from "simplex-noise";
@@ -9,7 +9,7 @@ import { animate } from "animejs";
 const TWO_PI = Math.PI * 2;
 const LANDING_BG = "#252123";
 const LANDING_FG = "#fafafa";
-const BLOB_SCALE = 0.4;
+const BLOB_SCALE = 0.35;
 const DOT_RADIUS = 3;
 
 interface NoiseBlobSectionProps {
@@ -25,7 +25,8 @@ export function NoiseBlobSection({
 }: NoiseBlobSectionProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasWrapRef = useRef<HTMLDivElement>(null);
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(2); // start at 2
+  const [scrollStep, setScrollStep] = useState(2); // track scroll-driven step
   const animRef = useRef({ t: 0 });
   const framesRef = useRef(0);
   const noiseRef = useRef(createNoise3D(() => Math.random()));
@@ -36,7 +37,6 @@ export function NoiseBlobSection({
     const ctx = canvas?.getContext("2d");
     if (!ctx || !canvas) return;
 
-    // Use CSS size (already DPR‑scaled in resize)
     const rect = canvas.getBoundingClientRect();
     const w = rect.width;
     const h = rect.height;
@@ -53,18 +53,6 @@ export function NoiseBlobSection({
 
     ctx.fillStyle = LANDING_BG;
     ctx.fillRect(0, 0, w, h);
-
-    if (step === 1) {
-      ctx.fillStyle = LANDING_FG;
-      for (let i = 0; i < 100; i++) {
-        const x = cos((i / 100) * TWO_PI) * r + cx;
-        const y = sin((i / 100) * TWO_PI) * r + cy;
-        ctx.beginPath();
-        ctx.arc(x, y, DOT_RADIUS, 0, TWO_PI);
-        ctx.fill();
-      }
-      return;
-    }
 
     if (step === 2) {
       ctx.fillStyle = LANDING_FG;
@@ -130,30 +118,6 @@ export function NoiseBlobSection({
       return;
     }
 
-    if (step === 5) {
-      const rings = 70;
-      ctx.lineWidth = 1;
-      ctx.fillStyle = LANDING_BG;
-      for (let j = 0; j < rings; j++) {
-        const rad = (r / rings) * (rings - j);
-        ctx.beginPath();
-        for (let i = 0; i <= 100; i++) {
-          let x = cos((i / 100) * TWO_PI);
-          let y = sin((i / 100) * TWO_PI);
-          const offset = noise(x, y + j * 0.03, 0) * (rad / 5);
-          x = x * (rad + offset) + cx;
-          y = y * (rad + offset) + cy;
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.closePath();
-        ctx.strokeStyle = `rgb(${(j / rings) * 175 + 80}, ${(j / rings) * 175 + 80}, ${(j / rings) * 175 + 80})`;
-        ctx.stroke();
-      }
-      rafRef.current = requestAnimationFrame(draw);
-      return;
-    }
-
     if (step === 6) {
       const rings = 70;
       ctx.lineWidth = 1;
@@ -178,30 +142,6 @@ export function NoiseBlobSection({
       rafRef.current = requestAnimationFrame(draw);
       return;
     }
-
-    if (step === 7) {
-      const rings = 40;
-      for (let j = 0; j < rings; j++) {
-        const rad = (r / rings) * (rings - j);
-        ctx.beginPath();
-        for (let i = 0; i <= 150; i++) {
-          let x = cos((i / 100) * TWO_PI);
-          let y = sin((i / 100) * TWO_PI);
-          const offset = noise(x, y + j * 0.03, frames * 0.003) * (rad / 3);
-          x = x * (rad + offset) + cx;
-          y = y * (rad + offset) + cy;
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.closePath();
-        ctx.fillStyle = `hsl(${(j / rings) * 360}, 70%, 70%)`;
-        ctx.strokeStyle = `hsl(${(j / rings) * 360}, 70%, 80%)`;
-        ctx.fill();
-        ctx.stroke();
-      }
-      framesRef.current = frames + 1;
-      rafRef.current = requestAnimationFrame(draw);
-    }
   }, [step]);
 
   // Resize canvas to match wrapper and handle DPR correctly
@@ -223,7 +163,6 @@ export function NoiseBlobSection({
 
       const ctx = canvas.getContext("2d");
       if (ctx) {
-        // Reset transform before scaling so it doesn't stack
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.scale(dpr, dpr);
       }
@@ -241,7 +180,7 @@ export function NoiseBlobSection({
     };
   }, [draw, step]);
 
-  // Drive step 1→7 from scroll position
+  // Two scroll zones with reduced thresholds: 2 → (scroll at 25%) → 3 → (scroll at 60%) → 6
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -250,34 +189,56 @@ export function NoiseBlobSection({
       const scrollTop = container.scrollTop;
       const heroHeightPx = (heroScrollHeightVh / 100) * window.innerHeight;
       const progress = Math.max(0, Math.min(1, scrollTop / heroHeightPx));
-      const newStep = progress >= 1 ? 7 : 1 + Math.floor(progress * 7);
-      setStep((prev) => (newStep >= 1 && newStep <= 7 ? newStep : prev));
+
+      // 0.0–0.25: scrollStep 2
+      // 0.25–0.60: scrollStep 3 (triggers 3→4 auto)
+      // 0.60–1.0: scrollStep 6
+      let newScrollStep = 2;
+      if (progress < 0.25) {
+        newScrollStep = 2;
+      } else if (progress < 0.6) {
+        newScrollStep = 3;
+      } else {
+        newScrollStep = 6;
+      }
+
+      if (newScrollStep !== scrollStep) {
+        setScrollStep(newScrollStep);
+        setStep(newScrollStep);
+      }
     };
 
     updateStepFromScroll();
     container.addEventListener("scroll", updateStepFromScroll, { passive: true });
     return () => container.removeEventListener("scroll", updateStepFromScroll);
-  }, [containerRef, heroScrollHeightVh]);
+  }, [containerRef, heroScrollHeightVh, scrollStep]);
 
-  // Animate steps 2–5 and init frames for 6–7
+  // Animate steps and handle auto-transitions
   useEffect(() => {
-    if (step >= 2 && step <= 5) {
+    if (step === 2 || step === 3 || step === 4) {
       animRef.current.t = 0;
       const anim = animate(animRef.current, {
         t: 1,
         duration: 3000,
-        ease: "outQuad",
+        easing: "easeOutQuad",
+        complete: () => {
+          // Auto-advance 3 → 4
+          if (step === 3) {
+            setStep(4);
+          }
+        },
       });
       return () => {
-        anim.cancel();
+        anim.pause();
       };
     }
-    if (step === 6 || step === 7) {
+
+    if (step === 6) {
       framesRef.current = 0;
     }
   }, [step]);
 
-  // Start draw loop for steps 2–7
+  // Start draw loop
   useEffect(() => {
     if (step >= 2) {
       draw();
@@ -315,5 +276,4 @@ export function NoiseBlobSection({
       </div>
     </div>
   );
-  
 }

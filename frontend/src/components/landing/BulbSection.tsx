@@ -15,42 +15,53 @@ export function BulbSection({ containerRef }: BulbSectionProps) {
     const container = containerRef.current;
     const target = sectionRef.current;
     const lamp = lampRef.current;
-    const glow = glowRef.current;
     if (!container || !target || !lamp) return;
 
-    // Bouncy jump in: start below viewport, overshoot up then settle
-    const entrance = animate(lamp, {
-      y: ["120%", "-6%", "0%"],
-      duration: 1000,
-      ease: "outBack",
-      autoplay: false,
-    });
+    // Roll from left to center (onScroll triggers when section enters view)
+    const rollIn = animate(
+      lamp,
+      {
+        x: ["-15rem", "0"],
+        rotate: "1turn",
+        duration: 2000,
+        ease: "outQuad",
+        autoplay: onScroll({ container, target, axis: "y", enter: 0.2 }),
+      }
+    );
+
+    return () => {
+      rollIn.cancel();
+      return;
+    };
+  }, [containerRef]);
+
+  // Light-up glow after lamp section has entered
+  useEffect(() => {
+    const container = containerRef.current;
+    const target = sectionRef.current;
+    const glow = glowRef.current;
+    if (!container || !target || !glow) return;
 
     const observer = onScroll({
       container,
       target,
       axis: "y",
       enter: 0.2,
-      onEnter: () => {
-        setHasEntered(true);
-        entrance.play();
-      },
+      onEnter: () => setHasEntered(true),
     });
 
     return () => {
       observer.revert();
-      entrance.cancel();
     };
   }, [containerRef]);
 
-  // Light-up glow after lamp has landed
   useEffect(() => {
     if (!hasEntered || !glowRef.current) return;
     const glow = glowRef.current;
     const anim = animate(glow, {
       opacity: [0, 0.9],
       duration: 800,
-      delay: 400,
+      delay: 600,
       ease: "outQuad",
     });
     return () => {
@@ -66,7 +77,7 @@ export function BulbSection({ containerRef }: BulbSectionProps) {
       <div
         ref={lampRef}
         className="relative flex justify-center items-end"
-        style={{ transform: "translateY(120%)" }}
+        style={{ transform: "translateX(-15rem)" }}
       >
         {/* Glow pool under lamp (lights up after bounce) */}
         <div
