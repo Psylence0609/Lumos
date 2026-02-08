@@ -839,6 +839,13 @@ export function DeviceCard({ device, onUpdate }: Props) {
           {coffeePhase === "ready" && (
             <p className="text-[10px] text-green-400">Ready!</p>
             )}
+            {device.device_type === "water_heater" && (
+              <p className="text-[10px] text-muted-foreground">
+                {device.properties.temperature_f?.toFixed(0)}°F
+                {device.properties.heating && <span className="text-orange-400 ml-1">Heating</span>}
+                {device.properties.mode === "boost" && <span className="text-red-400 ml-1">Boost</span>}
+              </p>
+            )}
             <p className="text-[10px] text-zinc-600">{formatWatts(device.current_watts)}</p>
           </div>
       </div>

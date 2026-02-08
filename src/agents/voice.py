@@ -15,20 +15,70 @@ from src.api.websocket import ws_manager
 
 logger = logging.getLogger(__name__)
 
-# Mapping of technical action names to human-readable descriptions (fallback)
-ACTION_DESCRIPTIONS: dict[str, str] = {
-    "pre_cool_home": "pre-cool the house to a comfortable temperature before the heat peaks",
-    "pre_cool": "pre-cool the house before the heat peaks",
-    "charge_battery": "charge the home battery to prepare for high demand",
-    "switch_to_battery": "switch to battery backup power",
-    "close_blinds": "close the blinds and dim the lights to reduce solar heat gain",
-    "reduce_non_essential": "turn off non-essential devices to conserve energy",
-    "reduce_consumption": "reduce overall energy consumption",
-    "set_eco_mode": "switch thermostats to energy-saving eco mode",
-    "increase_heating": "increase heating to keep the house warm and protect the pipes",
-    "defer_high_energy_tasks": "delay any high-energy tasks until prices drop",
-    "insulate_pipes_alert": "check that exposed pipes are insulated against freezing",
-}
+def _build_action_descriptions() -> dict[str, str]:
+    """Build a human-readable action descriptions map dynamically.
+
+    Combines device-level actions from the schema with higher-level
+    threat-response action phrases.  The device-level entries are
+    auto-generated so they stay in sync with DEVICE_TYPE_ACTIONS.
+    """
+    from src.models.device import DEVICE_TYPE_ACTIONS
+
+    descs: dict[str, str] = {}
+
+    # Auto-generated device-level descriptions
+    _FRIENDLY: dict[str, dict[str, str]] = {
+        "light": {"on": "turn on the lights", "off": "turn off the lights", "dim": "dim the lights"},
+        "thermostat": {
+            "set_temperature": "adjust the thermostat temperature",
+            "set_mode": "change the thermostat mode",
+            "eco_mode": "switch the thermostat to eco mode",
+        },
+        "smart_plug": {"on": "turn on the smart plug", "off": "turn off the smart plug"},
+        "lock": {"lock": "lock the door", "unlock": "unlock the door"},
+        "coffee_maker": {"brew": "brew coffee", "off": "turn off the coffee maker", "on": "switch on the coffee maker", "keep_warm": "keep the coffee warm"},
+        "battery": {"set_mode": "adjust the home battery mode"},
+        "water_heater": {"heat": "heat the water", "boost": "boost the water heater", "standby": "set the water heater to standby", "off": "turn off the water heater"},
+    }
+
+    for type_key, actions in DEVICE_TYPE_ACTIONS.items():
+        # DEVICE_TYPE_ACTIONS is dict[str, list[dict[str, Any]]]
+        # type_key is already a string (e.g., "light", "thermostat")
+        # actions is a list of dicts with "action" and "params" keys
+        for action_dict in actions:
+            action_name = action_dict["action"]  # Extract action name from dict
+            key = f"{type_key}_{action_name}"
+            friendly = _FRIENDLY.get(type_key, {}).get(action_name, f"{action_name} the {type_key}".replace("_", " "))
+            descs[key] = friendly
+            descs[action_name] = friendly  # also allow bare action name
+
+    # Higher-level threat-response phrases (not tied to a single device)
+    descs.update({
+        "pre_cool_home": "pre-cool the house before the heat peaks",
+        "pre_cool": "pre-cool the house before the heat peaks",
+        "charge_battery": "charge the home battery to prepare for high demand",
+        "switch_to_battery": "switch to battery backup power",
+        "close_blinds": "close the blinds and dim the lights to reduce solar heat gain",
+        "reduce_non_essential": "turn off non-essential devices to conserve energy",
+        "reduce_consumption": "reduce overall energy consumption",
+        "set_eco_mode": "switch thermostats to energy-saving eco mode",
+        "increase_heating": "increase heating to keep the house warm and protect the pipes",
+        "defer_high_energy_tasks": "delay any high-energy tasks until prices drop",
+        "insulate_pipes_alert": "check that exposed pipes are insulated against freezing",
+    })
+
+    return descs
+
+
+# Lazy-initialised once at first use
+_ACTION_DESCRIPTIONS: dict[str, str] | None = None
+
+
+def _get_action_descriptions() -> dict[str, str]:
+    global _ACTION_DESCRIPTIONS
+    if _ACTION_DESCRIPTIONS is None:
+        _ACTION_DESCRIPTIONS = _build_action_descriptions()
+    return _ACTION_DESCRIPTIONS
 
 SCRIPT_GENERATION_PROMPT = """You are a friendly smart home assistant speaking to the homeowner.
 Convert the following technical threat information into a natural, conversational voice message.
@@ -93,14 +143,15 @@ class VoiceAgent(BaseAgent):
 
         Falls back to a template-based approach if LLM fails.
         """
-        # Convert technical action names to human-readable
+        # Convert technical action names to human-readable (dynamic lookup)
+        descriptions = _get_action_descriptions()
         actions_readable = []
         for action in actions:
             action_lower = action.lower().replace(" ", "_")
-            desc = ACTION_DESCRIPTIONS.get(action_lower)
+            desc = descriptions.get(action_lower)
             if not desc:
                 # Try partial match
-                for key, val in ACTION_DESCRIPTIONS.items():
+                for key, val in descriptions.items():
                     if key in action_lower or action_lower in key:
                         desc = val
                         break
@@ -242,7 +293,8 @@ class VoiceAgent(BaseAgent):
                         "alert_id": aid,
                         "audio_base64": audio_b64,
                         "approved": result.get("approved", False),
-                        "user_response": result,
+                        "user_instructions": result.get("user_instructions", ""),
+                        "user_response": result,  # Keep for backwards compatibility
                     }
                 except asyncio.TimeoutError:
                     del self._pending_permissions[aid]
@@ -264,31 +316,95 @@ class VoiceAgent(BaseAgent):
             self._error = str(e)
             return {"alert_id": aid, "error": str(e), "approved": False}
 
-    async def handle_permission_response(self, alert_id: str, approved: bool, modifications: dict = {}) -> bool:
+    async def handle_permission_response(
+        self, alert_id: str, approved: bool | None = None, 
+        user_text: str = "", modifications: dict = {}
+    ) -> dict[str, Any]:
         """Handle user's permission response from the frontend.
 
         Args:
             alert_id: The alert ID to respond to
-            approved: Whether the user approved the action
-            modifications: Any modifications the user requested
+            approved: Whether the user approved (if None, will parse from user_text)
+            user_text: Natural language response from user (e.g., "yes", "only turn up the heat")
+            modifications: Any modifications the user requested (legacy, prefer user_text)
 
         Returns:
-            True if the response was processed successfully
+            dict with 'success' (bool) and optionally 'error_message' (str)
         """
         future = self._pending_permissions.get(alert_id)
         if not future:
             logger.warning(f"No pending permission for alert {alert_id}")
-            return False
+            return {"success": False, "error": "No pending permission found"}
 
-        future.set_result({
-            "approved": approved,
-            "modifications": modifications,
-        })
+        # Parse natural language response if provided
+        parsed_approved = approved
+        user_instructions = ""
+        
+        if user_text:
+            # First, run clarity check on the transcribed text
+            from src.agents.orchestrator import orchestrator
+            clarity_result = await orchestrator.check_command_clarity(user_text)
+            
+            if not clarity_result.get("is_clear", True):
+                # Text is unclear/gibberish - return error message
+                error_message = clarity_result.get("message", "I didn't quite understand that. Could you try again or type your request?")
+                result = {
+                    "approved": False,
+                    "user_instructions": "",
+                    "error_message": error_message,
+                    "modifications": modifications,
+                }
+                future.set_result(result)
+                
+                # Broadcast error to frontend
+                await ws_manager.broadcast("voice_alert_response", {
+                    "alert_id": alert_id,
+                    "approved": False,
+                    "user_text": user_text,
+                    "error_message": error_message,
+                })
+                
+                await event_store.log_event(Event(
+                    event_id=str(uuid.uuid4())[:8],
+                    event_type=EventType.USER_ACTION,
+                    source="user",
+                    data={
+                        "alert_id": alert_id,
+                        "approved": False,
+                        "user_text": user_text,
+                        "error": "unclear_input",
+                        "error_message": error_message,
+                    },
+                ))
+                
+                return {"success": True, "error_message": error_message}
+            
+            # Use cleaned text from clarity check
+            cleaned_text = clarity_result.get("cleaned_text", user_text)
+            
+            # Use LLM to parse the user's natural language response
+            parse_result = await self._parse_user_response(cleaned_text)
+            if parse_result:
+                parsed_approved = parse_result.get("approved", approved if approved is not None else False)
+                user_instructions = parse_result.get("instructions", "")
+        elif approved is None:
+            # Default to denied if neither approved nor user_text provided
+            parsed_approved = False
+
+        result = {
+            "approved": parsed_approved,
+            "user_instructions": user_instructions,
+            "modifications": modifications,  # Keep for backwards compatibility
+        }
+        
+        future.set_result(result)
 
         # Broadcast response
         await ws_manager.broadcast("voice_alert_response", {
             "alert_id": alert_id,
-            "approved": approved,
+            "approved": parsed_approved,
+            "user_text": user_text,
+            "user_instructions": user_instructions,
             "modifications": modifications,
         })
 
@@ -298,12 +414,60 @@ class VoiceAgent(BaseAgent):
             source="user",
             data={
                 "alert_id": alert_id,
-                "approved": approved,
-                "modifications": modifications,
+                "approved": parsed_approved,
+                "user_text": user_text,
+                "user_instructions": user_instructions,
             },
         ))
 
-        return True
+        return {"success": True}
+
+    async def _parse_user_response(self, user_text: str) -> dict[str, Any] | None:
+        """Parse user's natural language response to extract approval status and instructions.
+        
+        Returns:
+            dict with 'approved' (bool) and 'instructions' (str) keys, or None if parsing fails
+        """
+        prompt = f"""Parse the user's response to a smart home threat alert.
+
+USER SAID: "{user_text}"
+
+Determine:
+1. APPROVAL: Does the user approve the suggested actions?
+   - "yes", "okay", "ok", "go ahead", "sure", "yeah" → approved = true
+   - "no", "don't", "cancel", "stop", "nah" → approved = false
+   - If the user gives specific instructions (like "turn up the heat only"), they are approving but with modifications → approved = true
+   - If unclear or no clear approval/denial, default to false
+
+2. INSTRUCTIONS: Extract the COMPLETE user instruction, preserving their exact wording
+   - PRESERVE the user's exact phrasing, especially words like "only", "just", "don't"
+
+CRITICAL: If the user asserts, include the required words in the instructions - it's important!
+
+Respond with ONLY valid JSON:
+{{
+    "approved": true/false,
+    "instructions": "complete user instruction preserving their wording, or empty string if none"
+}}"""
+
+        try:
+            result = await llm_client.chat_json(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=150,
+            )
+            
+            if "error" in result:
+                logger.warning(f"Failed to parse user response: {result.get('error')}")
+                return None
+                
+            return {
+                "approved": result.get("approved", False),
+                "instructions": result.get("instructions", ""),
+            }
+        except Exception as e:
+            logger.warning(f"Error parsing user response: {e}")
+            return None
 
     @property
     def alert_history(self) -> list[dict[str, Any]]:

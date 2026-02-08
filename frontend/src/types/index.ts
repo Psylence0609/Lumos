@@ -74,6 +74,19 @@ export interface Scenario {
   id: string;
   name: string;
   description: string;
+  temporal?: boolean;
+  total_steps?: number;
+}
+
+export interface ScenarioStep {
+  scenario_id: string;
+  current_step: number;
+  total_steps: number;
+  timestamp: string;
+  title: string;
+  description: string;
+  metrics: Record<string, string>;
+  is_last: boolean;
 }
 
 export interface SimulationStatus {

@@ -101,6 +101,7 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
   const [sttStatus, setSttStatus] = useState<"idle" | "listening" | "processing">("idle");
   const [sttText, setSttText] = useState("");
   const [hasPlayed, setHasPlayed] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const hasAutoPlayed = useRef<string | null>(null);
@@ -116,28 +117,42 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
   }, []);
 
   // --- STT for permission responses ---
+  // The speech recognition hook handles the 3 second silence timeout
+  // After timeout, we process whatever text was transcribed (no need to check for action words)
   const handleSttResult = useCallback(
     (text: string) => {
       if (!alert?.require_permission || responding) return;
 
-      setSttText(text);
-      const lower = text.toLowerCase().trim();
+      // Clear any previous error when user starts speaking again
+      if (errorMessage) {
+        setErrorMessage(null);
+      }
 
-      const isApprove = APPROVE_WORDS.some((w) => lower.includes(w));
-      const isDeny = DENY_WORDS.some((w) => lower.includes(w));
-
-      if (isApprove) {
+      const trimmedText = text.trim();
+      
+      // If we have any transcribed text after the silence timeout, process it immediately
+      if (trimmedText) {
+        setSttText(trimmedText);
         setSttStatus("processing");
-        handleResponse(true);
-      } else if (isDeny) {
-        setSttStatus("processing");
-        handleResponse(false);
+        
+        // Stop listening since we have text and silence timeout occurred
+        if (isListening) stopListening();
+        
+        // Check for explicit approve/deny words, but if none found, pass null
+        // Backend will parse the instructions (e.g., "turn up the heating only")
+        const lower = trimmedText.toLowerCase();
+        const isApprove = APPROVE_WORDS.some((w) => lower.includes(w));
+        const isDeny = DENY_WORDS.some((w) => lower.includes(w));
+        
+        // Pass null if no explicit approve/deny - backend will infer from instructions
+        const approved = isApprove ? true : isDeny ? false : null;
+        handleResponse(approved, trimmedText);
       } else {
         setSttStatus("listening");
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [alert, responding]
+    [alert, responding, errorMessage, isListening, stopListening]
   );
 
   const {
@@ -148,7 +163,7 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
   } = useSpeechRecognition({
     continuous: true,
     onResult: handleSttResult,
-    onInterim: (text) => setSttText(text),
+    onInterim: (text) => setSttText(text), // Just update the display, don't process yet
     onError: () => setSttStatus("idle"),
   });
 
@@ -159,6 +174,7 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
       setSttStatus("idle");
       setSttText("");
       setHasPlayed(false);
+      setErrorMessage(null);
       setIsPlaying(false);
       if (autoDismissTimer.current) {
         clearTimeout(autoDismissTimer.current);
@@ -225,22 +241,38 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     }
   };
 
-  const handleResponse = async (approved: boolean) => {
+  const handleResponse = async (approved: boolean | null, userText: string = "") => {
     setResponding(true);
     if (isListening) stopListening();
     setSttStatus("processing");
+    setErrorMessage(null); // Clear any previous error
 
     try {
-      await apiFetch("/voice/permission", {
+      const response = await apiFetch("/voice/permission", {
         method: "POST",
         body: JSON.stringify({
           alert_id: alert.alert_id,
-          approved,
+          approved: approved, // Can be null if inferred from userText
+          user_text: userText || sttText, // Send the natural language response
           modifications: {},
         }),
       });
+      
+      // Check if there's an error message from clarity check
+      if (response.error_message) {
+        setErrorMessage(response.error_message);
+        setSttStatus("idle");
+        setSttText("");
+        // Don't dismiss - let user see the error and try again
+        setResponding(false);
+        return;
+      }
     } catch (e) {
       console.error("Permission response failed:", e);
+      setErrorMessage("Failed to process your response. Please try again.");
+      setSttStatus("idle");
+      setResponding(false);
+      return;
     }
     setResponding(false);
     setSttStatus("idle");

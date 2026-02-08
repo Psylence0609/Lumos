@@ -9,11 +9,13 @@ import { VoiceAlert } from "@/components/home/VoiceAlert";
 import { PatternPanel } from "@/components/home/PatternPanel";
 import { AgentActivity } from "@/components/home/AgentActivity";
 import { VoiceChatButton } from "@/components/home/VoiceChatButton";
+import { TimelineOverlay } from "@/components/sim/TimelineOverlay";
+import { MetricsPanel } from "@/components/sim/MetricsPanel";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { apiFetch } from "@/lib/utils";
-import type { DeviceState, EnergyData, ThreatAssessment, AgentInfo, VoiceAlert as VoiceAlertType, Pattern, RoomDevices } from "@/types";
+import type { DeviceState, EnergyData, ThreatAssessment, AgentInfo, VoiceAlert as VoiceAlertType, Pattern, RoomDevices, ScenarioStep } from "@/types";
 
 const ROOM_LABELS: Record<string, string> = {
   living_room: "Living Room",
@@ -21,6 +23,7 @@ const ROOM_LABELS: Record<string, string> = {
   kitchen: "Kitchen",
   office: "Office",
   front_door: "Front Door",
+  utility_room: "Utility Room",
   energy_system: "Energy System",
 };
 
@@ -61,6 +64,13 @@ export default function Dashboard() {
     s.textContent = css;
     document.head.appendChild(s);
   }, []);
+
+  // Temporal scenario state (shows on home dashboard too)
+  const [currentStep, setCurrentStep] = useState<ScenarioStep | null>(null);
+  const [scenarioName, setScenarioName] = useState<string | null>(null);
+  const [scenarioId, setScenarioId] = useState<string | null>(null);
+  const [finalMetrics, setFinalMetrics] = useState<Record<string, string>>({});
+  const [showMetrics, setShowMetrics] = useState(false);
 
   // Initial data fetch
   useEffect(() => {
@@ -160,6 +170,42 @@ export default function Dashboard() {
     pattern_suggestion: useCallback(() => {
       apiFetch<Pattern[]>("/patterns").then(setPatterns).catch(() => {});
     }, []),
+    // Temporal scenario events
+    scenario_active: useCallback((msg: any) => {
+      if (msg.data.temporal) {
+        setScenarioName(msg.data.name);
+        setScenarioId(msg.data.scenario_id);
+        setFinalMetrics({});
+        setShowMetrics(false);
+        setCurrentStep(null);
+      }
+    }, []),
+    scenario_step: useCallback((msg: any) => {
+      const step: ScenarioStep = msg.data;
+      setCurrentStep(step);
+      if (step.metrics && Object.keys(step.metrics).length > 0) {
+        setFinalMetrics((prev) => ({ ...prev, ...step.metrics }));
+      }
+      if (step.is_last) {
+        setShowMetrics(true);
+      }
+    }, []),
+    scenario_complete: useCallback(() => {
+      setTimeout(() => {
+        setCurrentStep(null);
+        setScenarioName(null);
+        setScenarioId(null);
+        setShowMetrics(false);
+        setFinalMetrics({});
+      }, 25000);
+    }, []),
+    scenario_stopped: useCallback(() => {
+      setCurrentStep(null);
+      setScenarioName(null);
+      setScenarioId(null);
+      setFinalMetrics({});
+      setShowMetrics(false);
+    }, []),
   });
 
   const [commandFeedback, setCommandFeedback] = useState<string | null>(null);
@@ -210,6 +256,20 @@ export default function Dashboard() {
           <span className="hidden sm:inline">{connected ? "Live" : "Disconnected"}</span>
         </Badge>
       </div>
+
+      {/* Timeline Overlay for Temporal Scenarios */}
+      <TimelineOverlay step={currentStep} scenarioName={scenarioName} />
+
+      {/* Final Metrics Panel */}
+      {showMetrics && (
+        <div className="mb-4">
+          <MetricsPanel
+            metrics={finalMetrics}
+            scenarioId={scenarioId}
+            visible={showMetrics}
+          />
+        </div>
+      )}
 
       {/* Threat Banner */}
       <div className="mb-4 sm:mb-6">

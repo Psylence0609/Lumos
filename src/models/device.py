@@ -1,4 +1,9 @@
-"""Pydantic models for device state and configuration."""
+"""Pydantic models for device state and configuration.
+
+Includes a centralized DEVICE_TYPE_ACTIONS schema that serves as the single
+source of truth for all LLM prompts across agents — no more duplicated
+device-action references.
+"""
 
 from datetime import datetime
 from enum import Enum
@@ -23,6 +28,77 @@ class DeviceType(str, Enum):
     COFFEE_MAKER = "coffee_maker"
     SENSOR = "sensor"
     SMART_PLUG = "smart_plug"
+    WATER_HEATER = "water_heater"
+
+
+# ---------------------------------------------------------------------------
+# Centralized action schema per device type.
+#
+# This is the SINGLE SOURCE OF TRUTH for what actions each device type
+# supports and what parameters they accept.  Every LLM prompt in the system
+# (orchestrator, pattern detector, preference parser, …) is auto-generated
+# from this dict — so adding a new device type or action only requires
+# editing this one place.
+# ---------------------------------------------------------------------------
+
+DEVICE_TYPE_ACTIONS: dict[str, list[dict[str, Any]]] = {
+    "light": [
+        {"action": "on", "params": {"brightness": "0-100"}},
+        {"action": "off", "params": {}},
+        {"action": "dim", "params": {"brightness": "0-100"}},
+        {"action": "color", "params": {"r": "0-255", "g": "0-255", "b": "0-255"}},
+    ],
+    "thermostat": [
+        {"action": "set_temperature", "params": {"temperature": "60-85"}},
+        {"action": "set_mode", "params": {"mode": "heat|cool|auto|eco|off"}},
+        {"action": "eco_mode", "params": {}},
+    ],
+    "smart_plug": [
+        {"action": "on", "params": {}},
+        {"action": "off", "params": {}},
+    ],
+    "lock": [
+        {"action": "lock", "params": {}},
+        {"action": "unlock", "params": {}},
+    ],
+    "coffee_maker": [
+        {"action": "brew", "params": {"strength": "light|medium|strong"}},
+        {"action": "off", "params": {}},
+        {"action": "keep_warm", "params": {}},
+    ],
+    "battery": [
+        {"action": "set_mode", "params": {"mode": "charge|discharge|auto|backup"}},
+    ],
+    "water_heater": [
+        {"action": "heat", "params": {"temperature_f": "100-160"}},
+        {"action": "boost", "params": {"temperature_f": "140"}},
+        {"action": "standby", "params": {}},
+        {"action": "off", "params": {}},
+    ],
+    "sensor": [],  # read-only, no actions
+}
+
+
+def build_action_reference_text() -> str:
+    """Build the device action reference block for LLM prompts.
+
+    Returns plain text (with real braces).  The caller is responsible for
+    escaping if the text is embedded inside a Python ``.format()`` template.
+    """
+    lines: list[str] = []
+    for type_str, actions in DEVICE_TYPE_ACTIONS.items():
+        if not actions:
+            lines.append(f"- {type_str}: read-only, no actions")
+            continue
+        parts: list[str] = []
+        for a in actions:
+            if a["params"]:
+                p = ", ".join(f'"{k}": {v}' for k, v in a["params"].items())
+                parts.append(f'"{a["action"]}" (params: {{{p}}})')
+            else:
+                parts.append(f'"{a["action"]}"')
+        lines.append(f"- {type_str}: {', '.join(parts)}")
+    return "\n".join(lines)
 
 
 class ThermostatMode(str, Enum):
