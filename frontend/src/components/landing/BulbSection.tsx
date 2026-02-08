@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { animate, onScroll } from "animejs";
+import { animate, onScroll, stagger, splitText, utils } from "animejs";
 
 interface BulbSectionProps {
   containerRef: React.RefObject<HTMLDivElement | null>;
 }
 
+const TAGLINE = "Sustainable, Personalized and Proactive home automation.";
+const HOVER_COLORS = ["#FF4B4B", "#FFCC2A", "#B7FF54", "#57F695"];
+
 export function BulbSection({ containerRef }: BulbSectionProps) {
   const sectionRef = useRef<HTMLElement>(null);
   const lampRef = useRef<HTMLDivElement>(null);
   const glowRef = useRef<HTMLDivElement>(null);
+  const taglineRef = useRef<HTMLParagraphElement>(null);
   const [hasEntered, setHasEntered] = useState(false);
 
   useEffect(() => {
@@ -91,28 +95,73 @@ export function BulbSection({ containerRef }: BulbSectionProps) {
     };
   }, [hasEntered]);
 
+  // Tagline: splitText with line y animation + word hover color (same as reference)
+  useEffect(() => {
+    const p = taglineRef.current;
+    if (!p || !hasEntered) return;
+    p.textContent = TAGLINE;
+    const colors: string[] = [];
+    const split = splitText(p, { lines: true });
+    split.addEffect(({ lines }: { lines: HTMLElement[] }) =>
+      animate(lines, {
+        y: ["50%", "-50%"],
+        loop: true,
+        alternate: true,
+        delay: stagger(400),
+        ease: "inOutQuad",
+      })
+    );
+    split.addEffect((splitInstance: { words: HTMLElement[] }) => {
+      splitInstance.words.forEach(($el: HTMLElement, i: number) => {
+        const color = colors[i];
+        if (color) utils.set($el, { color });
+        $el.addEventListener("pointerenter", () => {
+          animate($el, {
+            color: utils.randomPick(HOVER_COLORS) as string,
+            duration: 250,
+          });
+        });
+      });
+      return () => {
+        splitInstance.words.forEach((w: HTMLElement, i: number) => {
+          colors[i] = utils.get(w, "color") as string;
+        });
+      };
+    });
+    return () => {
+      split.revert();
+    };
+  }, [hasEntered]);
+
   return (
     <section
       ref={sectionRef}
       className="min-h-screen flex items-center justify-center bg-background px-4"
       style={{ minHeight: "300vh" }}
     >
-      <div
-        ref={lampRef}
-        className="relative flex justify-center items-end sticky top-1/2 -translate-y-1/2"
-        style={{ transform: "translateX(15rem) translateY(-50%)" }}
-      >
-        {/* Glow pool under lamp (lights up after roll) */}
+      <div className="sticky top-1/2 flex flex-col items-center justify-center -translate-y-1/2 w-full max-w-xl">
         <div
-          ref={glowRef}
-          className="absolute bottom-0 left-1/2 -translate-x-1/2 w-48 h-16 rounded-full opacity-0"
-          style={{
-            background:
-              "radial-gradient(ellipse 80% 50% at 50% 100%, rgba(250,204,21,0.4) 0%, transparent 70%)",
-            filter: "blur(8px)",
-          }}
+          ref={lampRef}
+          className="relative flex justify-center items-end"
+          style={{ transform: "translateX(15rem)" }}
+        >
+          <div
+            ref={glowRef}
+            className="absolute bottom-0 left-1/2 -translate-x-1/2 w-48 h-16 rounded-full opacity-0"
+            style={{
+              background:
+                "radial-gradient(ellipse 80% 50% at 50% 100%, rgba(250,204,21,0.4) 0%, transparent 70%)",
+              filter: "blur(8px)",
+            }}
+          />
+          <DeskLampSvg />
+        </div>
+        {/* Tagline when lamp is centered: same font as Lumos, enlarged; splitText line + word hover animation */}
+        <p
+          ref={taglineRef}
+          className={`font-lumos mt-8 text-center text-2xl sm:text-3xl md:text-4xl text-muted-foreground font-medium transition-opacity duration-500 ${hasEntered ? "opacity-100" : "opacity-0"}`}
+          style={{ maxWidth: "40ch" }}
         />
-        <DeskLampSvg />
       </div>
     </section>
   );

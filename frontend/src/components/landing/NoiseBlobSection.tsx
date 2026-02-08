@@ -1,6 +1,7 @@
 /**
  * Noise blob behind Lumos title. Two scroll triggers advance through:
  * 2 → (scroll) → 3 → auto 4 → (scroll) → 6
+ * Optimized for 60fps with smooth transitions
  */
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createNoise3D } from "simplex-noise";
@@ -25,17 +26,25 @@ export function NoiseBlobSection({
 }: NoiseBlobSectionProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasWrapRef = useRef<HTMLDivElement>(null);
-  const [step, setStep] = useState(2); // start at 2
-  const [scrollStep, setScrollStep] = useState(2); // track scroll-driven step
+  const [step, setStep] = useState(2);
+  const [scrollStep, setScrollStep] = useState(2);
   const animRef = useRef({ t: 0 });
-  const framesRef = useRef(0);
+  const timeRef = useRef(0);
+  const lastFrameTimeRef = useRef(0);
   const noiseRef = useRef(createNoise3D(() => Math.random()));
   const rafRef = useRef<number>(0);
+  const transitionRef = useRef({ progress: 0 }); // For smooth transitions
 
-  const draw = useCallback(() => {
+  const draw = useCallback((timestamp: number) => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!ctx || !canvas) return;
+
+    if (!lastFrameTimeRef.current) lastFrameTimeRef.current = timestamp;
+    const deltaTime = timestamp - lastFrameTimeRef.current;
+    lastFrameTimeRef.current = timestamp;
+
+    timeRef.current += deltaTime * 0.001;
 
     const rect = canvas.getBoundingClientRect();
     const w = rect.width;
@@ -46,7 +55,8 @@ export function NoiseBlobSection({
     const cy = h / 2;
     const noise = noiseRef.current;
     const anim = animRef.current;
-    const frames = framesRef.current;
+    const time = timeRef.current;
+    const transition = transitionRef.current.progress;
 
     const cos = Math.cos;
     const sin = Math.sin;
@@ -56,16 +66,17 @@ export function NoiseBlobSection({
 
     if (step === 2) {
       ctx.fillStyle = LANDING_FG;
+      ctx.beginPath();
       for (let i = 0; i < 100; i++) {
         let x = cos((i / 100) * TWO_PI);
         let y = sin((i / 100) * TWO_PI);
         const offset = noise(x, y, 0) * (r / 5) * anim.t;
         x = x * (r + offset) + cx;
         y = y * (r + offset) + cy;
-        ctx.beginPath();
+        ctx.moveTo(x + DOT_RADIUS, y);
         ctx.arc(x, y, DOT_RADIUS, 0, TWO_PI);
-        ctx.fill();
       }
+      ctx.fill();
       rafRef.current = requestAnimationFrame(draw);
       return;
     }
@@ -74,32 +85,51 @@ export function NoiseBlobSection({
       ctx.strokeStyle = LANDING_FG;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
+
+      const points = [];
       for (let i = 0; i <= 100; i++) {
         let x = cos((i / 100) * TWO_PI);
         let y = sin((i / 100) * TWO_PI);
         const offset = noise(x, y, 0) * (r / 5);
         x = x * (r + offset) + cx;
         y = y * (r + offset) + cy;
-        if (anim.t >= i / 100) {
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
+        points.push({ x, y, progress: i / 100 });
+      }
+
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        if (anim.t >= p.progress) {
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
         }
-        ctx.fillStyle = LANDING_FG;
-        ctx.beginPath();
-        ctx.arc(x, y, DOT_RADIUS * (1 - anim.t), 0, TWO_PI);
-        ctx.fill();
       }
       ctx.stroke();
+
+      ctx.fillStyle = LANDING_FG;
+      ctx.beginPath();
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        const dotSize = DOT_RADIUS * (1 - anim.t);
+        if (dotSize > 0.1) {
+          ctx.moveTo(p.x + dotSize, p.y);
+          ctx.arc(p.x, p.y, dotSize, 0, TWO_PI);
+        }
+      }
+      ctx.fill();
+
       rafRef.current = requestAnimationFrame(draw);
       return;
     }
 
     if (step === 4) {
       const rings = 70;
-      ctx.strokeStyle = LANDING_FG;
       ctx.lineWidth = 1;
       ctx.fillStyle = LANDING_BG;
-      for (let j = 0; j <= rings * anim.t; j++) {
+
+      // Blend between single outline and full rings based on transition
+      const maxRings = Math.floor(rings * anim.t);
+      
+      for (let j = 0; j <= maxRings; j++) {
         const rad = (r / rings) * (rings - j);
         ctx.beginPath();
         for (let i = 0; i <= 100; i++) {
@@ -112,8 +142,17 @@ export function NoiseBlobSection({
           else ctx.lineTo(x, y);
         }
         ctx.closePath();
+        
+        // Smooth transition to grayscale
+        const gray = Math.floor((j / rings) * 175 + 80);
+        const alpha = Math.min(1, transition * 3); // Fade in grayscale
+        ctx.strokeStyle = `rgba(${gray}, ${gray}, ${gray}, ${alpha})`;
+        if (transition < 0.3) {
+          ctx.strokeStyle = LANDING_FG; // Keep white initially
+        }
         ctx.stroke();
       }
+      
       rafRef.current = requestAnimationFrame(draw);
       return;
     }
@@ -122,13 +161,14 @@ export function NoiseBlobSection({
       const rings = 70;
       ctx.lineWidth = 1;
       ctx.fillStyle = LANDING_BG;
+
       for (let j = 0; j < rings; j++) {
         const rad = (r / rings) * (rings - j);
         ctx.beginPath();
         for (let i = 0; i <= 100; i++) {
           let x = cos((i / 100) * TWO_PI);
           let y = sin((i / 100) * TWO_PI);
-          const offset = noise(x, y + j * 0.03, frames * 0.003) * (rad / 5);
+          const offset = noise(x, y + j * 0.03, time * 0.5) * (rad / 5);
           x = x * (rad + offset) + cx;
           y = y * (rad + offset) + cy;
           if (i === 0) ctx.moveTo(x, y);
@@ -138,13 +178,13 @@ export function NoiseBlobSection({
         ctx.strokeStyle = `rgb(${(j / rings) * 175 + 80}, ${(j / rings) * 175 + 80}, ${(j / rings) * 175 + 80})`;
         ctx.stroke();
       }
-      framesRef.current = frames + 1;
+      
       rafRef.current = requestAnimationFrame(draw);
       return;
     }
   }, [step]);
 
-  // Resize canvas to match wrapper and handle DPR correctly
+  // Resize canvas
   useEffect(() => {
     const canvas = canvasRef.current;
     const wrap = canvasWrapRef.current;
@@ -165,9 +205,12 @@ export function NoiseBlobSection({
       if (ctx) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.scale(dpr, dpr);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
       }
 
-      draw();
+      lastFrameTimeRef.current = 0;
+      rafRef.current = requestAnimationFrame(draw);
     };
 
     resize();
@@ -180,68 +223,107 @@ export function NoiseBlobSection({
     };
   }, [draw, step]);
 
-  // Two scroll zones with reduced thresholds: 2 → (scroll at 25%) → 3 → (scroll at 60%) → 6
+  // Scroll handler with smooth transitions
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
+    let scrollTimeout: number;
     const updateStepFromScroll = () => {
-      const scrollTop = container.scrollTop;
-      const heroHeightPx = (heroScrollHeightVh / 100) * window.innerHeight;
-      const progress = Math.max(0, Math.min(1, scrollTop / heroHeightPx));
+      if (scrollTimeout) cancelAnimationFrame(scrollTimeout);
 
-      // 0.0–0.25: scrollStep 2
-      // 0.25–0.60: scrollStep 3 (triggers 3→4 auto)
-      // 0.60–1.0: scrollStep 6
-      let newScrollStep = 2;
-      if (progress < 0.25) {
-        newScrollStep = 2;
-      } else if (progress < 0.6) {
-        newScrollStep = 3;
-      } else {
-        newScrollStep = 6;
-      }
+      scrollTimeout = requestAnimationFrame(() => {
+        const scrollTop = container.scrollTop;
+        const heroHeightPx = (heroScrollHeightVh / 100) * window.innerHeight;
+        const progress = Math.max(0, Math.min(1, scrollTop / heroHeightPx));
 
-      if (newScrollStep !== scrollStep) {
-        setScrollStep(newScrollStep);
-        setStep(newScrollStep);
-      }
+        let newScrollStep = 2;
+        if (progress < 0.25) {
+          newScrollStep = 2;
+        } else if (progress < 0.6) {
+          newScrollStep = 3;
+        } else {
+          newScrollStep = 6;
+        }
+
+        if (newScrollStep !== scrollStep) {
+          setScrollStep(newScrollStep);
+          setStep(newScrollStep);
+          
+          // Reset transition progress when changing steps
+          transitionRef.current.progress = 0;
+        }
+      });
     };
 
     updateStepFromScroll();
     container.addEventListener("scroll", updateStepFromScroll, { passive: true });
-    return () => container.removeEventListener("scroll", updateStepFromScroll);
+    return () => {
+      container.removeEventListener("scroll", updateStepFromScroll);
+      if (scrollTimeout) cancelAnimationFrame(scrollTimeout);
+    };
   }, [containerRef, heroScrollHeightVh, scrollStep]);
 
-  // Animate steps and handle auto-transitions
+  // Animate steps with smooth transitions
   useEffect(() => {
     if (step === 2 || step === 3 || step === 4) {
       animRef.current.t = 0;
+      timeRef.current = 0;
+      lastFrameTimeRef.current = 0;
+      transitionRef.current.progress = 0;
+
       const anim = animate(animRef.current, {
         t: 1,
         duration: 3000,
         easing: "easeOutQuad",
         complete: () => {
-          // Auto-advance 3 → 4
           if (step === 3) {
-            setStep(4);
+            // Smooth transition from 3 to 4
+            animate(transitionRef.current, {
+              progress: 1,
+              duration: 1500,
+              easing: "easeInOutQuad",
+              complete: () => {
+                setStep(4);
+              },
+            });
           }
         },
       });
+
+      // Animate transition progress for step 4
+      if (step === 4) {
+        animate(transitionRef.current, {
+          progress: 1,
+          duration: 2000,
+          easing: "easeInOutQuad",
+        });
+      }
+
       return () => {
         anim.pause();
       };
     }
 
     if (step === 6) {
-      framesRef.current = 0;
+      timeRef.current = 0;
+      lastFrameTimeRef.current = 0;
+      transitionRef.current.progress = 0;
+      
+      // Smooth fade-in for step 6
+      animate(transitionRef.current, {
+        progress: 1,
+        duration: 1500,
+        easing: "easeInOutQuad",
+      });
     }
   }, [step]);
 
   // Start draw loop
   useEffect(() => {
     if (step >= 2) {
-      draw();
+      lastFrameTimeRef.current = 0;
+      rafRef.current = requestAnimationFrame(draw);
     }
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -259,6 +341,7 @@ export function NoiseBlobSection({
         justifyContent: "center",
         zIndex: 0,
         overflow: "visible",
+        willChange: "transform",
       }}
     >
       <div ref={canvasWrapRef}>
