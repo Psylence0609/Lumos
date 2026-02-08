@@ -799,7 +799,7 @@ export function DeviceCard({ device, onUpdate }: Props) {
           </div>
 
         {/* name */}
-        <p className="text-xs font-semibold text-foreground truncate text-center">
+        <p className="text-xs font-semibold truncate text-center" style={{ color: 'var(--color-device-type)' }}>
           {device.display_name}
         </p>
 

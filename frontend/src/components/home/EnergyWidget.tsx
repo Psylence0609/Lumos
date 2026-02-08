@@ -27,22 +27,21 @@ function AnimatedStat({ value, format }: { value: number; format?: "watts" | "pc
   return <>{display.toFixed(1)}</>;
 }
 
-/* ── Battery SVG with liquid fill ── */
+/* ── Battery SVG with liquid fill (wave constrained inside clip so it doesn't escape) ── */
 function BatterySvg({ pct, mode }: { pct: number; mode: string }) {
   const fillColor = pct > 50 ? "#22c55e" : pct > 20 ? "#eab308" : "#ef4444";
   const fillH = Math.max(0, 24 * pct * 0.01);
-  const wy = 30 - fillH;
+  const wy = Math.max(6, Math.min(30, 30 - fillH)); // liquid surface y (clip is 6..30)
+  // Wave path entirely inside clip: ripple stays at or below wy so nothing escapes
+  const wavePath = `M7 30 L7 ${wy} Q11 ${wy + 0.5} 16 ${wy + 0.15} Q20 ${wy + 0.6} 25 ${wy} L25 30 Z`;
   return (
-    <svg viewBox="0 0 32 36" className="w-8 h-9 shrink-0">
+    <svg viewBox="0 0 32 36" className="w-9 h-10 shrink-0">
       <rect x="11" y="1" width="10" height="3" rx="1.5" fill="#52525b" />
       <rect x="5" y="4" width="22" height="28" rx="3" fill="none" stroke={fillColor} strokeWidth="1.5" />
       <defs><clipPath id="ew-bc"><rect x="7" y="6" width="18" height="24" rx="1.5" /></clipPath></defs>
       <g clipPath="url(#ew-bc)">
-        <path
-          d={`M2 ${wy+2} Q8 ${wy-1} 14 ${wy+2} Q20 ${wy+4} 26 ${wy+1} Q32 ${wy-1} 38 ${wy+2} L38 34 L2 34 Z`}
-          fill={fillColor} opacity="0.35"
-        >
-          <animateTransform attributeName="transform" type="translate" values="-2,0;2,0;-2,0" dur="2.5s" repeatCount="indefinite" />
+        <path d={wavePath} fill={fillColor} opacity="0.4">
+          <animateTransform attributeName="transform" type="translate" values="-0.6,0;0.6,0;-0.6,0" dur="2.5s" repeatCount="indefinite" />
         </path>
       </g>
       {pct > 0 && pct < 100 && (
@@ -60,7 +59,7 @@ function SolarSvg({ watts }: { watts: number }) {
   const rayLen = 3 + intensity * 5;
   const c = watts > 0 ? "#f59e0b" : "#52525b";
   return (
-    <svg viewBox="0 0 32 32" className="w-8 h-8 shrink-0">
+    <svg viewBox="0 0 32 32" className="w-9 h-9 shrink-0">
       <circle cx="16" cy="16" r="6" fill={watts > 0 ? "rgba(245,158,11,0.15)" : "none"} stroke={c} strokeWidth="1.5"
         style={watts > 0 ? { filter: "drop-shadow(0 0 4px rgba(245,158,11,0.4))" } : undefined} />
       {[0,45,90,135,180,225,270,315].map((deg) => (
@@ -86,7 +85,7 @@ function SolarSvg({ watts }: { watts: number }) {
 function GridArrowSvg({ exporting }: { exporting: boolean }) {
   const c = exporting ? "#22c55e" : "#f97316";
   return (
-    <svg viewBox="0 0 24 24" className="w-6 h-6 shrink-0">
+    <svg viewBox="0 0 24 24" className="w-7 h-7 shrink-0">
       {exporting ? (
         <g>
           <path d="M12 18 L12 6" stroke={c} strokeWidth="2" strokeLinecap="round" />
@@ -113,7 +112,7 @@ function ConsumptionArc({ watts }: { watts: number }) {
   const offset = circ * (1 - pct);
   const c = pct < 0.4 ? "#22c55e" : pct < 0.7 ? "#eab308" : "#ef4444";
   return (
-    <svg viewBox="0 0 28 28" className="w-7 h-7 shrink-0">
+    <svg viewBox="0 0 28 28" className="w-8 h-8 shrink-0">
       <circle cx="14" cy="14" r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="2.5" />
       <circle cx="14" cy="14" r={r} fill="none" stroke={c} strokeWidth="2.5"
         strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
@@ -164,62 +163,62 @@ export function EnergyWidget({ energy }: Props) {
   const isExporting = energy.net_grid_watts < 0;
 
   return (
-    <Card className="overflow-hidden">
-      <CardHeader className="pb-1 sm:pb-2 px-3 sm:px-6 pt-3 sm:pt-6">
-        <CardTitle className="flex items-center gap-2 text-xs sm:text-sm">
-          <svg viewBox="0 0 20 20" className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0">
+    <Card className="overflow-hidden min-w-[280px] sm:min-w-[300px]">
+      <CardHeader className="pb-2 sm:pb-3 px-4 sm:px-6 pt-4 sm:pt-6">
+        <CardTitle className="flex items-center gap-2 text-sm sm:text-base">
+          <svg viewBox="0 0 20 20" className="w-4 h-4 sm:w-5 sm:h-5 shrink-0">
             <path d="M11 1 L5 11 L9 11 L8 19 L15 9 L11 9 Z" fill="#facc15" opacity="0.9" />
           </svg>
           Energy
         </CardTitle>
       </CardHeader>
-      <CardContent className="px-3 sm:px-6 pb-3 sm:pb-6">
+      <CardContent className="px-4 sm:px-6 pb-4 sm:pb-6">
         {/* Energy flow animation */}
         <EnergyFlow solar={energy.solar_generation_watts} consumption={energy.total_consumption_watts} />
 
-        <div className="grid grid-cols-2 gap-2 sm:gap-3">
+        <div className="grid grid-cols-2 gap-3 sm:gap-4">
           {/* Battery */}
-          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <BatterySvg pct={energy.battery_pct} mode={energy.battery_mode} />
             <div className="min-w-0">
-              <p className="text-base sm:text-lg font-bold leading-tight truncate" style={{ transition: "color 0.45s cubic-bezier(0.33,1,0.68,1)",
+              <p className="text-lg sm:text-xl font-bold leading-tight truncate" style={{ transition: "color 0.45s cubic-bezier(0.33,1,0.68,1)",
                 color: energy.battery_pct > 50 ? "#4ade80" : energy.battery_pct > 20 ? "#facc15" : "#ef4444" }}>
                 <AnimatedStat value={energy.battery_pct} format="pct" />
               </p>
-              <p className="text-[10px] text-muted-foreground truncate">{energy.battery_mode}</p>
+              <p className="text-xs text-muted-foreground truncate">{energy.battery_mode}</p>
             </div>
           </div>
 
           {/* Solar */}
-          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <SolarSvg watts={energy.solar_generation_watts} />
             <div className="min-w-0">
-              <p className="text-base sm:text-lg font-bold leading-tight text-amber-400 truncate">
+              <p className="text-lg sm:text-xl font-bold leading-tight text-amber-400 truncate">
                 <AnimatedStat value={energy.solar_generation_watts} format="watts" />
               </p>
-              <p className="text-[10px] text-muted-foreground">solar</p>
+              <p className="text-xs text-muted-foreground">solar</p>
             </div>
           </div>
 
           {/* Consumption */}
-          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <ConsumptionArc watts={energy.total_consumption_watts} />
             <div className="min-w-0">
-              <p className="text-xs sm:text-sm font-semibold truncate">
+              <p className="text-sm sm:text-base font-semibold truncate">
                 <AnimatedStat value={energy.total_consumption_watts} format="watts" />
               </p>
-              <p className="text-[10px] text-muted-foreground">using</p>
+              <p className="text-xs text-muted-foreground">using</p>
             </div>
           </div>
 
           {/* Grid */}
-          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <GridArrowSvg exporting={isExporting} />
             <div className="min-w-0">
-              <p className="text-xs sm:text-sm font-semibold truncate">
+              <p className="text-sm sm:text-base font-semibold truncate">
                 <AnimatedStat value={Math.abs(energy.net_grid_watts)} format="watts" />
               </p>
-              <p className="text-[10px] text-muted-foreground truncate">
+              <p className="text-xs text-muted-foreground truncate">
                 {isExporting ? "exporting" : "from grid"}
               </p>
             </div>

@@ -306,7 +306,7 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
             </motion.div>
             {isPlaying && <SoundWaveBars />}
             <span className="text-sm font-semibold">
-              {alert.require_permission ? "Voice Alert" : "Smart Home"}
+              {alert.require_permission ? "Voice Alert" : "Lumos"}
             </span>
             {isHolding && (
               <motion.span
