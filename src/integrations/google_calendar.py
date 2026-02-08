@@ -43,23 +43,26 @@ class GoogleCalendarClient:
         self._override_events = None
 
     async def initialize(self) -> bool:
-        """Initialize Google Calendar API with OAuth credentials."""
+        """Initialize Google Calendar API with OAuth credentials.
+        
+        This method tries to load from token.json (legacy) or uses
+        a token set via initialize_with_token() from frontend OAuth.
+        """
         if self._initialized:
             return True
-
-        client_id = settings.google_client_id
-        client_secret = settings.google_client_secret
-
-        if not client_id or client_id == "your_google_client_id_here":
-            logger.info("Google Calendar not configured, using simulation mode")
-            return False
 
         try:
             from google.oauth2.credentials import Credentials
             from googleapiclient.discovery import build
 
-            # This requires a token.json from the OAuth flow
-            # The setup_google_oauth.py script handles the initial auth
+            # First, try to use token set via initialize_with_token (from frontend OAuth)
+            if self._credentials:
+                self._service = build("calendar", "v3", credentials=self._credentials)
+                self._initialized = True
+                logger.info("Google Calendar API initialized with frontend token")
+                return True
+
+            # Fallback: try to load from token.json (legacy method)
             import os
             token_path = os.path.join(os.path.dirname(__file__), "../../token.json")
 
@@ -70,14 +73,51 @@ class GoogleCalendarClient:
                 )
                 self._service = build("calendar", "v3", credentials=self._credentials)
                 self._initialized = True
-                logger.info("Google Calendar API initialized")
+                logger.info("Google Calendar API initialized from token.json")
                 return True
             else:
-                logger.warning("Google Calendar token not found. Run setup_google_oauth.py first.")
+                logger.info("Google Calendar not initialized. Sign in via frontend or run setup_google_oauth.py")
                 return False
 
         except Exception as e:
             logger.error(f"Failed to initialize Google Calendar: {e}")
+            return False
+
+    async def initialize_with_token(self, access_token: str, expires_in: int = 3600) -> bool:
+        """Initialize Google Calendar API with an access token from frontend OAuth.
+        
+        Args:
+            access_token: OAuth access token from frontend
+            expires_in: Token expiration time in seconds
+            
+        Returns:
+            True if initialization successful
+        """
+        try:
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+
+            # Create credentials from the access token
+            self._credentials = Credentials(
+                token=access_token,
+                refresh_token=None,  # Implicit flow doesn't provide refresh token
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=settings.google_client_id,
+                client_secret=settings.google_client_secret,
+                scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+            )
+
+            # Build the service
+            self._service = build("calendar", "v3", credentials=self._credentials)
+            self._initialized = True
+            logger.info("Google Calendar API initialized with frontend OAuth token")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to initialize Google Calendar with token: {e}")
+            self._credentials = None
+            self._service = None
+            self._initialized = False
             return False
 
     async def get_upcoming_events(self, hours_ahead: int = 2) -> list[CalendarEvent]:

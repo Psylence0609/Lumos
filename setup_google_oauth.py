@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root))
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow, Flow
 from config import settings
 
 # Scopes required for Google Calendar read-only access
@@ -50,28 +50,68 @@ def main():
                 print("Please set GOOGLE_CLIENT_ID in your .env file")
                 sys.exit(1)
 
-            # Create flow from client ID and secret
-            flow = InstalledAppFlow.from_client_config(
-                {
-                    "installed": {
-                        "client_id": settings.google_client_id,
-                        "client_secret": settings.google_client_secret,
-                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                        "token_uri": "https://oauth2.googleapis.com/token",
-                        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                        "redirect_uris": [
-                            "http://localhost:8080/",
-                            "urn:ietf:wg:oauth:2.0:oob",
-                        ],
-                    }
-                },
-                SCOPES,
-            )
-
-            # Run the flow (opens browser for authentication)
-            print("\n browser will open for authentication...")
-            print("   If it doesn't open, copy the URL from the terminal")
-            creds = flow.run_local_server(port=8080)
+            # Try to detect client type and create appropriate flow
+            # First, try as Installed App (Desktop app)
+            try:
+                print("Attempting OAuth flow as Desktop/Installed app...")
+                flow = InstalledAppFlow.from_client_config(
+                    {
+                        "installed": {
+                            "client_id": settings.google_client_id,
+                            "client_secret": settings.google_client_secret,
+                            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                            "token_uri": "https://oauth2.googleapis.com/token",
+                            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                            "redirect_uris": [
+                                "http://localhost:8080/",
+                                "urn:ietf:wg:oauth:2.0:oob",
+                            ],
+                        }
+                    },
+                    SCOPES,
+                )
+                # Run the flow (opens browser for authentication)
+                print("\n✅ Browser will open for authentication...")
+                print("   If it doesn't open, copy the URL from the terminal")
+                creds = flow.run_local_server(port=8080)
+            except Exception as e:
+                # If installed app fails, try as Web application
+                if "invalid_client" in str(e).lower() or "401" in str(e):
+                    print(f"\n⚠️  Installed app flow failed: {e}")
+                    print("Trying as Web application client...")
+                    try:
+                        flow = Flow.from_client_config(
+                            {
+                                "web": {
+                                    "client_id": settings.google_client_id,
+                                    "client_secret": settings.google_client_secret,
+                                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                                    "token_uri": "https://oauth2.googleapis.com/token",
+                                    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                                    "redirect_uris": [
+                                        "http://localhost:8080/",
+                                    ],
+                                }
+                            },
+                            SCOPES,
+                            redirect_uri="http://localhost:8080/",
+                        )
+                        # Run the flow (opens browser for authentication)
+                        print("\n✅ Browser will open for authentication...")
+                        print("   If it doesn't open, copy the URL from the terminal")
+                        creds = flow.run_local_server(port=8080)
+                    except Exception as e2:
+                        print(f"\n❌ Web application flow also failed: {e2}")
+                        print("\nTroubleshooting:")
+                        print("1. Verify your Client ID and Client Secret in .env file")
+                        print("2. In Google Cloud Console, check your OAuth client type:")
+                        print("   - For Desktop app: Use 'Desktop app' or 'Installed app' type")
+                        print("   - For Web app: Use 'Web application' type")
+                        print("3. Ensure redirect URI 'http://localhost:8080/' is added")
+                        print("4. Make sure OAuth consent screen is configured")
+                        raise
+                else:
+                    raise
 
         # Save the token for future use
         with open(TOKEN_PATH, "w") as token_file:

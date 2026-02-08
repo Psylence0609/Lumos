@@ -23,6 +23,7 @@ from src.api.routes.threats import router as threats_router
 from src.api.routes.patterns import router as patterns_router
 from src.api.routes.voice import router as voice_router
 from src.api.routes.simulation import router as simulation_router
+from src.api.routes.auth import router as auth_router
 
 # Configure logging
 logging.basicConfig(
@@ -107,6 +108,7 @@ app.include_router(threats_router, prefix="/api/v1")
 app.include_router(patterns_router, prefix="/api/v1")
 app.include_router(voice_router, prefix="/api/v1")
 app.include_router(simulation_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")
