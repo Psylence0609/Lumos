@@ -839,7 +839,7 @@ export function DeviceCard({ device, onUpdate }: Props) {
           {coffeePhase === "ready" && (
             <p className="text-[10px] text-green-400">Ready!</p>
             )}
-            {device.device_type === "water_heater" && (
+          {device.device_type === "water_heater" && (
               <p className="text-[10px] text-muted-foreground">
                 {device.properties.temperature_f?.toFixed(0)}°F
                 {device.properties.heating && <span className="text-orange-400 ml-1">Heating</span>}

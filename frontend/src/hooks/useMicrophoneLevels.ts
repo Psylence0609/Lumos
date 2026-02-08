@@ -67,7 +67,7 @@ export function useMicrophoneLevels(isActive: boolean): number[] {
 
         const update = () => {
           if (cancelled || !analyserRef.current || !dataRef.current) return;
-          analyserRef.current.getByteFrequencyData(dataRef.current);
+          analyserRef.current.getByteFrequencyData(dataRef.current as Uint8Array<ArrayBuffer>);
           const raw = dataRef.current;
           const step = Math.floor(raw.length / BAR_COUNT);
           const next = Array.from({ length: BAR_COUNT }, (_, i) => {

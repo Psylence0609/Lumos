@@ -9,13 +9,15 @@ const EXPECTED_CODES = ['ECONNRESET', 'ECONNREFUSED', 'EPIPE']
 function suppressExpectedProxyErrors(proxy: { emit: (event: string, ...args: unknown[]) => boolean; on: (event: string, fn: (err: NodeJS.ErrnoException) => void) => void }) {
   const originalEmit = proxy.emit.bind(proxy)
   proxy.emit = function (event: string, err?: unknown, ...args: unknown[]) {
-    if (event === 'error' && err && typeof err === 'object' && EXPECTED_CODES.includes((err as NodeJS.ErrnoException).code)) {
+    const code = err && typeof err === 'object' ? (err as NodeJS.ErrnoException).code : undefined
+    if (event === 'error' && typeof code === 'string' && EXPECTED_CODES.includes(code)) {
       return true
     }
     return originalEmit(event, err, ...args)
   }
   proxy.on('error', (err: NodeJS.ErrnoException) => {
-    if (EXPECTED_CODES.includes(err?.code)) return
+    const code = err?.code
+    if (typeof code === 'string' && EXPECTED_CODES.includes(code)) return
     console.error('[proxy]', err?.message ?? err)
   })
 }
@@ -36,13 +38,13 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8000',
         secure: false,
-        configure: suppressExpectedProxyErrors,
+        configure: suppressExpectedProxyErrors as (proxy: unknown, options: unknown) => void,
       },
       '/ws': {
         target: 'ws://localhost:8000',
         ws: true,
         secure: false,
-        configure: suppressExpectedProxyErrors,
+        configure: suppressExpectedProxyErrors as (proxy: unknown, options: unknown) => void,
       },
     },
   },

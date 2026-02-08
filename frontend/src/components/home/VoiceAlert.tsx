@@ -117,43 +117,9 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
   }, []);
 
   // --- STT for permission responses ---
-  // The speech recognition hook handles the 3 second silence timeout
-  // After timeout, we process whatever text was transcribed (no need to check for action words)
-  const handleSttResult = useCallback(
-    (text: string) => {
-      if (!alert?.require_permission || responding) return;
-
-      // Clear any previous error when user starts speaking again
-      if (errorMessage) {
-        setErrorMessage(null);
-      }
-
-      const trimmedText = text.trim();
-      
-      // If we have any transcribed text after the silence timeout, process it immediately
-      if (trimmedText) {
-        setSttText(trimmedText);
-        setSttStatus("processing");
-        
-        // Stop listening since we have text and silence timeout occurred
-        if (isListening) stopListening();
-        
-        // Check for explicit approve/deny words, but if none found, pass null
-        // Backend will parse the instructions (e.g., "turn up the heating only")
-        const lower = trimmedText.toLowerCase();
-        const isApprove = APPROVE_WORDS.some((w) => lower.includes(w));
-        const isDeny = DENY_WORDS.some((w) => lower.includes(w));
-        
-        // Pass null if no explicit approve/deny - backend will infer from instructions
-        const approved = isApprove ? true : isDeny ? false : null;
-        handleResponse(approved, trimmedText);
-      } else {
-        setSttStatus("listening");
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [alert, responding, errorMessage, isListening, stopListening]
-  );
+  // Use a ref so the hook can be called with a stable callback that forwards to the real handler
+  // (which needs isListening/stopListening from the hook)
+  const sttResultHandlerRef = useRef<(text: string) => void>(() => {});
 
   const {
     isSupported: sttSupported,
@@ -162,10 +128,39 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     stopListening,
   } = useSpeechRecognition({
     continuous: true,
-    onResult: handleSttResult,
-    onInterim: (text) => setSttText(text), // Just update the display, don't process yet
+    onResult: (text) => sttResultHandlerRef.current(text),
+    onInterim: (text) => setSttText(text),
     onError: () => setSttStatus("idle"),
   });
+
+  const handleSttResult = useCallback(
+    (text: string) => {
+      if (!alert?.require_permission || responding) return;
+
+      if (errorMessage) setErrorMessage(null);
+
+      const trimmedText = text.trim();
+
+      if (trimmedText) {
+        setSttText(trimmedText);
+        setSttStatus("processing");
+        if (isListening) stopListening();
+
+        const lower = trimmedText.toLowerCase();
+        const isApprove = APPROVE_WORDS.some((w) => lower.includes(w));
+        const isDeny = DENY_WORDS.some((w) => lower.includes(w));
+        const approved = isApprove ? true : isDeny ? false : null;
+        handleResponse(approved, trimmedText);
+      } else {
+        setSttStatus("listening");
+      }
+    },
+    [alert?.require_permission, responding, errorMessage, isListening, stopListening]
+  );
+
+  useEffect(() => {
+    sttResultHandlerRef.current = handleSttResult;
+  }, [handleSttResult]);
 
   // --- Auto-play audio when a new alert arrives ---
   useEffect(() => {
@@ -302,8 +297,8 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
         className="fixed right-4 left-4 sm:left-auto sm:right-6 z-50 sm:w-96 bg-card border border-border rounded-xl shadow-2xl overflow-hidden backdrop-blur-sm max-h-[85vh] overflow-y-auto"
         style={{
           bottom: "calc(1rem + env(safe-area-inset-bottom, 0px))",
+          ...(needsPermGlow ? { animation: "va-glow 2s ease-in-out infinite" } : {}),
         }}
-        style={needsPermGlow ? { animation: "va-glow 2s ease-in-out infinite" } : undefined}
       >
         <div className="p-4">
           {/* Header */}
