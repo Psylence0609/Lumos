@@ -55,6 +55,8 @@ export function useSpeechRecognition(
   const [transcript, setTranscript] = useState("");
   const recognitionRef = useRef<any>(null);
   const finalTranscriptRef = useRef("");
+  const silenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shouldStopRef = useRef(false); // Flag to prevent auto-restart after timeout
 
   // Store latest callbacks in refs so recognition event handlers see them
   const onResultRef = useRef(onResult);
@@ -72,6 +74,9 @@ export function useSpeechRecognition(
       return;
     }
 
+    // Reset stop flag when starting fresh
+    shouldStopRef.current = false;
+    
     // Create a fresh instance each time
     const recognition = new SpeechRecognitionAPI();
     recognition.lang = lang;
@@ -83,6 +88,12 @@ export function useSpeechRecognition(
       setIsListening(true);
       finalTranscriptRef.current = "";
       setTranscript("");
+      shouldStopRef.current = false; // Reset flag on start
+      // Clear any existing timeout when starting fresh
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
     };
 
     recognition.onresult = (event: any) => {
@@ -108,12 +119,56 @@ export function useSpeechRecognition(
       if (interim) {
         onInterimRef.current?.(fullText);
       }
-      if (final) {
+      
+      // Reset silence timeout on ANY transcription activity (interim or final)
+      // This detects when the user has stopped speaking
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+      }
+
+      // For continuous mode: wait for silence timeout before processing
+      // For non-continuous mode: process immediately on final results
+      if (final && !continuous) {
+        // Non-continuous mode: process immediately
         onResultRef.current?.(finalTranscriptRef.current.trim());
+      } else if (continuous) {
+        // Continuous mode: set timeout to stop listening after 2.5 seconds of no new transcription
+        // This triggers when user stops speaking (no new results for 2.5 seconds)
+        silenceTimeoutRef.current = setTimeout(() => {
+          const finalText = finalTranscriptRef.current.trim();
+          if (recognitionRef.current && !shouldStopRef.current) {
+            // Set flag to prevent auto-restart
+            shouldStopRef.current = true;
+            // Abort (more forceful than stop) to prevent auto-restart in continuous mode
+            try {
+              recognitionRef.current.abort();
+            } catch (e) {
+              // If abort fails, try stop
+              try {
+                recognitionRef.current.stop();
+              } catch (e2) {
+                // Ignore errors if already stopped
+              }
+            }
+            // Clear the ref to prevent any further operations
+            recognitionRef.current = null;
+            setIsListening(false);
+            // Trigger the result callback with the final text (only if we have text)
+            if (finalText) {
+              onResultRef.current?.(finalText);
+            }
+          }
+        }, 3000); // 3 seconds of silence (no new transcription results)
       }
     };
 
     recognition.onerror = (event: any) => {
+      // Clear timeout on error
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+      
       // "no-speech" and "aborted" are expected when user releases quickly
       if (event.error === "no-speech" || event.error === "aborted") {
         setIsListening(false);
@@ -126,6 +181,22 @@ export function useSpeechRecognition(
 
     recognition.onend = () => {
       setIsListening(false);
+      // Clear timeout on end
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+      
+      // If we intentionally stopped (via timeout or manual stop), don't restart
+      if (shouldStopRef.current) {
+        recognitionRef.current = null;
+        return;
+      }
+      
+      // In continuous mode, the Web Speech API will automatically restart
+      // We don't need to manually restart it - it handles that itself
+      // But we prevent restart if shouldStopRef is true (handled above)
+      
       // In non-continuous mode, fire onResult with whatever we got
       if (!continuous && finalTranscriptRef.current.trim()) {
         onResultRef.current?.(finalTranscriptRef.current.trim());
@@ -137,9 +208,24 @@ export function useSpeechRecognition(
   }, [lang, continuous]);
 
   const stopListening = useCallback(() => {
+    shouldStopRef.current = true; // Set flag to prevent restart
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
     if (recognitionRef.current) {
-      recognitionRef.current.stop();
+      try {
+        recognitionRef.current.abort(); // Use abort to prevent auto-restart
+      } catch (e) {
+        // If abort fails, try stop
+        try {
+          recognitionRef.current.stop();
+        } catch (e2) {
+          // Ignore errors if already stopped
+        }
+      }
       recognitionRef.current = null;
+      setIsListening(false);
     }
   }, []);
 
@@ -151,8 +237,16 @@ export function useSpeechRecognition(
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      shouldStopRef.current = true;
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+      }
       if (recognitionRef.current) {
-        recognitionRef.current.abort();
+        try {
+          recognitionRef.current.abort();
+        } catch (e) {
+          // Ignore errors
+        }
       }
     };
   }, []);

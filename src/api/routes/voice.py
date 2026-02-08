@@ -17,8 +17,9 @@ class VoiceAlertRequest(BaseModel):
 
 class PermissionResponse(BaseModel):
     alert_id: str
-    approved: bool
-    modifications: dict = {}
+    approved: bool | None = None  # Optional - can be inferred from user_text
+    user_text: str = ""  # Natural language response (e.g., "yes", "only turn up the heat")
+    modifications: dict = {}  # Legacy field, kept for backwards compatibility
 
 
 @router.post("/alert")
@@ -33,13 +34,22 @@ async def send_voice_alert(req: VoiceAlertRequest) -> dict[str, Any]:
 
 @router.post("/permission")
 async def respond_to_permission(req: PermissionResponse) -> dict[str, Any]:
-    """Respond to a permission request."""
-    success = await voice_agent.handle_permission_response(
+    """Respond to a permission request with natural language support.
+    
+    Can accept either:
+    - approved: bool (simple yes/no)
+    - user_text: str (natural language like "only turn up the heat")
+    
+    Returns:
+        dict with 'success' (bool) and optionally 'error_message' (str) if clarity check fails
+    """
+    result = await voice_agent.handle_permission_response(
         alert_id=req.alert_id,
         approved=req.approved,
+        user_text=req.user_text,
         modifications=req.modifications,
     )
-    return {"success": success}
+    return result
 
 
 @router.get("/history")

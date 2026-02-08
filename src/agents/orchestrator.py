@@ -279,6 +279,10 @@ class OrchestratorAgent(BaseAgent):
         # Calendar / home-mode tracking
         self._current_home_mode: str = "normal"
         self._pre_mode_device_snapshot: dict[str, dict[str, Any]] | None = None
+        # Track currently handling threats to prevent duplicates
+        self._handling_threats: set[str] = set()  # Set of threat_keys currently being handled
+        # Track threats that have been informed about (to prevent re-notification)
+        self._informed_threats: dict[str, datetime] = {}  # threat_key -> timestamp when informed
 
     @property
     def decision_history(self) -> list[dict[str, Any]]:
@@ -321,6 +325,17 @@ class OrchestratorAgent(BaseAgent):
         try:
             while True:
                 await asyncio.sleep(10)
+                # Clean up old informed threats (older than 1 hour)
+                now = datetime.now()
+                expired_keys = [
+                    key for key, timestamp in self._informed_threats.items()
+                    if (now - timestamp).total_seconds() > 3600
+                ]
+                for key in expired_keys:
+                    del self._informed_threats[key]
+                if expired_keys:
+                    logger.debug(f"Cleaned up {len(expired_keys)} expired threat notifications")
+                
                 await self._check_and_respond()
         except asyncio.CancelledError:
             pass
@@ -482,13 +497,31 @@ class OrchestratorAgent(BaseAgent):
             # Handle both enum and string values for threat_level/threat_type
             threat_type_val = self._get_threat_type_str(assessment)
             threat_level_val = self._get_threat_level_str(assessment)
-            threat_key = f"{threat_type_val}_{threat_level_val}"
+            # Use a more unique key: type + level + summary hash to avoid duplicates
+            summary_hash = hash(assessment.summary) % 10000
+            threat_key = f"{threat_type_val}_{threat_level_val}_{summary_hash}"
 
-            # Avoid duplicate handling
-            recent_decisions = [d.get("threat_key") for d in self._decision_history[-5:]]
-            if threat_key in recent_decisions:
+            # Avoid duplicate handling - check both recent decisions and currently handling
+            recent_decisions = [d.get("threat_key") for d in self._decision_history[-10:]]
+            if threat_key in recent_decisions or threat_key in self._handling_threats:
+                logger.debug(f"Skipping duplicate threat handling: {threat_key}")
                 return
 
+            # Check if we've already informed about this threat recently (within 30 minutes)
+            # This prevents re-notification when threat conditions persist
+            if threat_key in self._informed_threats:
+                informed_time = self._informed_threats[threat_key]
+                time_since_informed = (datetime.now() - informed_time).total_seconds()
+                if time_since_informed < 1800:  # 30 minutes
+                    logger.debug(
+                        f"Already informed about threat {threat_key} {int(time_since_informed/60)} minutes ago, skipping notification"
+                    )
+                    # Still allow actions if user explicitly requests, but skip voice alert
+                    return
+
+            # Mark as currently handling and as informed
+            self._handling_threats.add(threat_key)
+            self._informed_threats[threat_key] = datetime.now()
             logger.info(f"Handling threat: {assessment.summary}")
 
             needs_permission = assessment.requires_user_permission()
@@ -496,32 +529,54 @@ class OrchestratorAgent(BaseAgent):
             logger.error(f"Error in _handle_threat (early): {e}", exc_info=True)
             raise
 
-        # Voice alert with natural language script
-        threat_level_str = threat_level_val  # Already extracted above
-        voice_result = await voice_agent.run(
-            message=assessment.summary,
-            require_permission=needs_permission,
-            threat_summary=assessment.summary,
-            threat_level=threat_level_str,
-            actions=assessment.recommended_actions[:4],
-        )
+        try:
+            # Voice alert with natural language script
+            threat_level_str = threat_level_val  # Already extracted above
+            voice_result = await voice_agent.run(
+                message=assessment.summary,
+                require_permission=needs_permission,
+                threat_summary=assessment.summary,
+                threat_level=threat_level_str,
+                actions=assessment.recommended_actions[:4],
+            )
 
-        if needs_permission:
-            approved = voice_result.get("approved", False)
-            if approved:
-                logger.info("User approved threat response — executing actions")
-                await self._execute_threat_response(assessment)
+            if needs_permission:
+                approved = voice_result.get("approved", False)
+                user_instructions = voice_result.get("user_instructions", "")
+                user_response = voice_result.get("user_response", {})
+                raw_user_text = user_response.get("user_text", "") if isinstance(user_response, dict) else ""
+                
+                logger.info(
+                    f"User response: approved={approved}, "
+                    f"instructions='{user_instructions}', "
+                    f"raw_text='{raw_user_text}'"
+                )
+                
+                if approved:
+                    if user_instructions:
+                        logger.info(f"User approved with modifications: {user_instructions}")
+                        # Parse user instructions and modify the action plan
+                        await self._execute_threat_response_with_modifications(
+                            assessment, user_instructions
+                        )
+                    else:
+                        logger.info("User approved threat response — executing actions")
+                        await self._execute_threat_response(assessment)
+                else:
+                    logger.info("User denied threat response actions")
             else:
-                logger.info("User denied threat response actions")
-        else:
-            await self._execute_threat_response(assessment)
+                await self._execute_threat_response(assessment)
 
-        self._decision_history.append({
-            "threat_key": threat_key,
-            "assessment": assessment.summary,
-            "actions_executed": voice_result.get("approved", not needs_permission),
-            "timestamp": assessment.timestamp.isoformat(),
-        })
+            self._decision_history.append({
+                "threat_key": threat_key,
+                "assessment": assessment.summary,
+                "actions_executed": voice_result.get("approved", not needs_permission),
+                "user_instructions": voice_result.get("user_instructions", ""),
+                "timestamp": assessment.timestamp.isoformat(),
+            })
+        finally:
+            # Always remove from handling set when done
+            self._handling_threats.discard(threat_key)
 
     async def _execute_threat_response(self, assessment) -> None:
         """Use LLM to dynamically plan and execute threat response based on all available devices."""
@@ -593,6 +648,175 @@ class OrchestratorAgent(BaseAgent):
         except Exception as e:
             logger.error(f"LLM-based threat response failed: {e}", exc_info=True)
             await self._fallback_threat_response(assessment)
+
+    async def _execute_threat_response_with_modifications(
+        self, assessment, user_instructions: str
+    ) -> None:
+        """Execute threat response with user-specified modifications to the action plan.
+        
+        Parses the user's natural language instructions (e.g., "only turn up the heat")
+        and modifies the LLM-generated action plan accordingly.
+        """
+        device_inventory = self._build_device_inventory()
+        threat_type_val = self._get_threat_type_str(assessment)
+        threat_level_val = self._get_threat_level_str(assessment)
+
+        # First, get the base threat response plan
+        user_patterns_text = self._format_user_patterns("threat", threat_type_val)
+        base_prompt = _build_threat_prompt(
+            threat_level=threat_level_val,
+            threat_type=threat_type_val,
+            threat_summary=assessment.summary,
+            threat_reasoning=assessment.reasoning,
+            device_inventory=device_inventory,
+            user_location=user_info_agent.location.value,
+        )
+
+        global_constraints = self._format_global_constraints()
+        if global_constraints:
+            base_prompt += (
+                "\n\n⚠ MANDATORY USER RULES (these override all other guidelines — "
+                "violating these is FORBIDDEN):\n"
+                f"{global_constraints}"
+            )
+
+        if user_patterns_text != "None":
+            base_prompt += (
+                "\n\nCONTEXTUAL PREFERENCES (honour these for this threat):\n"
+                f"{user_patterns_text}"
+            )
+
+        # Add user modification instructions
+        modification_prompt = f"""
+CRITICAL: USER HAS PROVIDED SPECIFIC MODIFICATIONS TO THE ACTION PLAN
+
+USER SAID: "{user_instructions}"
+
+ABSOLUTE RULE: The user's instructions COMPLETELY OVERRIDE the default threat response plan.
+You MUST follow these instructions EXACTLY. No exceptions.
+
+DETECTING ASSERTION WORDS:
+Check if the user's instruction contains ANY of these assertion words: "only", "just", "solely", "exclusively", "merely", "simply"
+If YES → This is an ASSERTED instruction. You MUST execute ONLY what the user explicitly mentioned. ALL other actions must be REMOVED.
+
+STEP-BY-STEP PROCESS:
+1. Parse the user instruction: "{user_instructions}"
+2. Check for assertion words: "only", "just", "solely", "exclusively", "merely", "simply"
+3. If assertion words found:
+   - Identify what the user wants (e.g., "turn up the heat" = thermostat actions)
+   - Create a NEW action plan with ONLY those specific actions
+   - REMOVE all other actions from the plan
+4. If no assertion words:
+   - Follow the instruction as a modification (add/remove specific actions)
+
+OUTPUT REQUIREMENTS:
+- Return ONLY the actions that match the user's asserted instruction
+- If user says "only X", return actions for X ONLY
+- Do NOT include any actions that are not explicitly mentioned in the user's instruction
+- If you're unsure, err on the side of including FEWER actions, not more
+
+Generate the MODIFIED action plan now. Remember: If the user used assertion words, ONLY include the explicitly mentioned actions.
+"""
+
+        prompt = base_prompt + modification_prompt
+
+        try:
+            result = await llm_client.chat_json(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+
+            if "error" in result and "actions" not in result:
+                logger.warning(f"LLM failed for modified threat response: {result.get('error')}")
+                # Fallback to base plan
+                await self._execute_threat_response(assessment)
+                return
+
+            reasoning = result.get("reasoning", "")
+            actions = result.get("actions", [])
+
+            # Safety check: If user instruction contains assertion words, filter actions
+            assertion_words = ["only", "just", "solely", "exclusively", "merely", "simply"]
+            user_lower = user_instructions.lower()
+            has_assertion = any(word in user_lower for word in assertion_words)
+            
+            if has_assertion:
+                # Extract what the user wants (e.g., "heat", "thermostat", "temperature")
+                # Filter actions to only include those related to what the user mentioned
+                filtered_actions = []
+                user_keywords = []
+                
+                # Extract keywords from user instruction
+                if "heat" in user_lower or "temperature" in user_lower or "thermostat" in user_lower or "warm" in user_lower:
+                    user_keywords.extend(["thermostat", "heat", "temperature", "warm", "cool"])
+                if "light" in user_lower:
+                    user_keywords.append("light")
+                if "lock" in user_lower or "door" in user_lower:
+                    user_keywords.extend(["lock", "door"])
+                if "plug" in user_lower or "appliance" in user_lower or "device" in user_lower:
+                    user_keywords.extend(["plug", "appliance"])
+                
+                # Filter actions based on device type and action name
+                for action in actions:
+                    device_id = action.get("device_id", "")
+                    action_name = action.get("action", "")
+                    device = device_registry.get_device(device_id)
+                    
+                    if device:
+                        device_type = device.device_type.value.lower()
+                        device_name = device.state.display_name.lower()
+                        
+                        # Check if this action matches what the user wants
+                        matches = False
+                        for keyword in user_keywords:
+                            if keyword in device_type or keyword in device_name or keyword in action_name:
+                                matches = True
+                                break
+                        
+                        if matches:
+                            filtered_actions.append(action)
+                        else:
+                            logger.debug(
+                                f"Filtered out action {device_id}.{action_name} - not matching user instruction"
+                            )
+                
+                if filtered_actions:
+                    logger.info(
+                        f"Assertion detected: Filtered {len(actions)} actions down to {len(filtered_actions)} "
+                        f"based on user instruction: {user_instructions}"
+                    )
+                    actions = filtered_actions
+                else:
+                    logger.warning(
+                        f"Assertion detected but no matching actions found. "
+                        f"User said: {user_instructions}, keywords: {user_keywords}"
+                    )
+
+            logger.info(
+                f"LLM planned {len(actions)} modified threat response actions: {reasoning}"
+            )
+
+            executed, failed = await self._execute_action_plan(actions)
+
+            logger.info(
+                f"Modified threat response complete: {len(executed)} executed, {len(failed)} failed"
+            )
+            if failed:
+                logger.warning(f"Failed actions: {failed}")
+
+            await ws_manager.broadcast("orchestrator_action", {
+                "type": "threat_response_modified",
+                "assessment": assessment.summary,
+                "user_instructions": user_instructions,
+                "reasoning": reasoning,
+                "actions_executed": executed,
+                "actions_failed": failed,
+            })
+
+        except Exception as e:
+            logger.error(f"LLM-based modified threat response failed: {e}", exc_info=True)
+            # Fallback to base plan
+            await self._execute_threat_response(assessment)
 
     async def _fallback_threat_response(self, assessment) -> None:
         """Rule-based fallback when LLM is unavailable for threat response.
