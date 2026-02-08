@@ -1,6 +1,8 @@
 """Orchestrator Agent -- coordinates all agents, uses LLM for dynamic action planning.
 
-Includes pattern-aware constraint enforcement at execution time.
+Prompts are built dynamically: the device-action reference block and the
+critical-device list are generated from the device registry at call time
+rather than being hardcoded into template strings.
 """
 
 import asyncio
@@ -30,10 +32,35 @@ logger = logging.getLogger(__name__)
 # Recognised home modes (in priority order for conflict resolution)
 HOME_MODES = ("normal", "active", "preparing_for_meeting", "focus", "do_not_disturb", "sleep")
 
+
 # ---------------------------------------------------------------------------
-# Prompt: general user commands (e.g. "set up my house for bedtime")
+# Prompt helpers — inject dynamic sections into templates
 # ---------------------------------------------------------------------------
-ORCHESTRATOR_PROMPT = """You are the central orchestrator for a smart home system.
+
+def _action_ref() -> str:
+    """Return the dynamic device-action reference block."""
+    return device_registry.build_action_reference()
+
+
+def _critical_text() -> str:
+    """Return the dynamic critical-device warning."""
+    ids = device_registry.build_critical_devices_text()
+    return (
+        f"NEVER turn off CRITICAL-priority devices: {ids}. "
+        "Sensors are read-only. Battery must never be turned off."
+    )
+
+
+def _build_prompt(*sections: str) -> str:
+    """Concatenate prompt sections with double-newline separators."""
+    return "\n\n".join(s for s in sections if s)
+
+
+# ---------------------------------------------------------------------------
+# Prompt: general user commands
+# ---------------------------------------------------------------------------
+
+_ORCHESTRATOR_HEADER = """You are the central orchestrator for a smart home system.
 You coordinate multiple agents to make intelligent decisions.
 
 CURRENT CONTEXT:
@@ -46,42 +73,46 @@ CURRENT CONTEXT:
 ALL AVAILABLE DEVICES:
 {device_inventory}
 
-REQUEST: {request}
+REQUEST: {request}"""
 
-Device action reference:
-- light: "on" (params: {{"brightness": 0-100}}), "off", "dim" (params: {{"brightness": 0-100}}), "color" (params: {{"r": 0-255, "g": 0-255, "b": 0-255}})
-- thermostat: "set_temperature" (params: {{"temperature": 60-85}}), "set_mode" (params: {{"mode": "heat|cool|auto|eco|off"}}), "eco_mode"
-- smart_plug: "on", "off"
-- lock: "lock", "unlock"
-- coffee_maker: "brew" (params: {{"strength": "light|medium|strong"}}), "off", "keep_warm"
-- battery: "set_mode" (params: {{"mode": "charge|discharge|auto|backup"}})
-- sensor: read-only, no actions
-
-CRITICAL RULES:
+_ORCHESTRATOR_RULES = """CRITICAL RULES:
 1. ONLY produce actions if the request CLEARLY relates to controlling home devices, environment, or matches a known pattern.
 2. If the request is random words, unrelated to smart home control, or you cannot determine a meaningful action, return an EMPTY actions list and set "not_understood" to true.
 3. Do NOT hallucinate or guess actions for nonsensical requests. When in doubt, return no actions.
-4. Check active patterns — if the request matches a pattern name or keyword (e.g. "movie" matches "Movie Mode"), execute that pattern's actions.
+4. Check active patterns — if the request matches a pattern name or keyword (e.g. "movie" matches "Movie Mode"), execute that pattern's actions."""
 
-Respond with ONLY valid JSON:
-{{
+_ORCHESTRATOR_RESPONSE = """Respond with ONLY valid JSON:
+{
     "reasoning": "Why these actions are needed (or why the request is not understood)",
     "actions": [
-        {{
+        {
             "device_id": "exact_device_id",
             "action": "action_name",
-            "parameters": {{}}
-        }}
+            "parameters": {}
+        }
     ],
     "alert_message": "Optional voice message to user",
     "require_permission": false,
     "not_understood": false
-}}"""
+}"""
+
+
+def _build_orchestrator_prompt(**kwargs: Any) -> str:
+    header = _ORCHESTRATOR_HEADER.format(**kwargs)
+    return _build_prompt(
+        header,
+        "DEVICE ACTION REFERENCE:\n" + _action_ref(),
+        _critical_text(),
+        _ORCHESTRATOR_RULES,
+        _ORCHESTRATOR_RESPONSE,
+    )
+
 
 # ---------------------------------------------------------------------------
-# Prompt: LLM-based threat response planning (replaces hardcoded handlers)
+# Prompt: LLM-based threat response planning
 # ---------------------------------------------------------------------------
-THREAT_RESPONSE_PROMPT = """You are the smart home orchestrator. A threat has been detected.
+
+_THREAT_HEADER = """You are the smart home orchestrator. A threat has been detected.
 Analyze the threat and decide EXACTLY which devices to adjust. Be comprehensive.
 
 THREAT:
@@ -93,76 +124,82 @@ THREAT:
 USER LOCATION: {user_location}
 
 ALL AVAILABLE DEVICES (current state):
-{device_inventory}
+{device_inventory}"""
 
-RULES:
-1. NEVER turn off CRITICAL-priority devices. Specifically: plug_kitchen_fridge (fridge) must NEVER be turned off. Battery and sensors must not be turned off.
-2. Locks may only be locked (not unlocked) during threats.
-3. Be comprehensive — adjust ALL relevant devices, not just one or two.
-4. Use the EXACT device_id values shown above.
+_THREAT_RULES = """RULES:
+1. Locks may only be locked (not unlocked) during threats.
+2. Be comprehensive — adjust ALL relevant devices, not just one or two.
+3. Use the EXACT device_id values shown above.
 4. For heat_wave: set thermostats to cool mode at 68°F, turn off non-essential lights and plugs (low/medium priority), charge battery.
 5. For grid_strain: set thermostats to eco mode, turn off ALL low-priority and medium-priority lights/plugs, switch battery to backup.
 6. For cold_snap: set thermostats to heat mode at 72°F, charge battery.
 7. For storm: lock all doors, switch battery to backup, turn off low-priority devices.
 8. For power_outage: switch battery to backup, turn off ALL non-essential devices.
-9. Always include thermostat adjustments AND non-essential device shutoffs when threat is HIGH or CRITICAL.
+9. Always include thermostat adjustments AND non-essential device shutoffs when threat is HIGH or CRITICAL."""
 
-DEVICE ACTION REFERENCE:
-- light: "on" (params: {{"brightness": 0-100}}), "off" (no params), "dim" (params: {{"brightness": 0-100}})
-- thermostat: "set_temperature" (params: {{"temperature": 60-85}}), "set_mode" (params: {{"mode": "heat|cool|auto|eco|off"}}), "eco_mode" (no params)
-- smart_plug: "on" (no params), "off" (no params)
-- lock: "lock" (no params), "unlock" (no params)
-- coffee_maker: "brew" (params: {{"strength": "light|medium|strong"}}), "off" (no params)
-- battery: "set_mode" (params: {{"mode": "charge|discharge|auto|backup"}})
-- sensor: READ ONLY — no actions
-
-Respond with ONLY valid JSON:
-{{
+_THREAT_RESPONSE = """Respond with ONLY valid JSON:
+{
     "reasoning": "Brief explanation of why these specific actions",
     "actions": [
-        {{"device_id": "exact_id", "action": "action_name", "parameters": {{}}}}
+        {"device_id": "exact_id", "action": "action_name", "parameters": {}}
     ]
-}}"""
+}"""
+
+
+def _build_threat_prompt(**kwargs: Any) -> str:
+    header = _THREAT_HEADER.format(**kwargs)
+    return _build_prompt(
+        header,
+        _critical_text(),
+        _THREAT_RULES,
+        "DEVICE ACTION REFERENCE:\n" + _action_ref(),
+        _THREAT_RESPONSE,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Prompt: LLM-based GPS / location response
 # ---------------------------------------------------------------------------
-LOCATION_RESPONSE_PROMPT = """You are the smart home orchestrator. The user's GPS location has changed.
+
+_LOCATION_HEADER = """You are the smart home orchestrator. The user's GPS location has changed.
 Decide which devices to adjust based on the new location and current device states.
 
 NEW LOCATION: {current_location}
 
 ALL AVAILABLE DEVICES (current state):
-{device_inventory}
+{device_inventory}"""
 
-RULES BY LOCATION:
-- AWAY: Lock all doors. Turn off ALL lights. Turn off non-essential smart plugs (but NOT the fridge — it is critical). Turn off coffee maker. Set all thermostats to eco mode.
+_LOCATION_RULES = """RULES BY LOCATION:
+- AWAY: Lock all doors. Turn off ALL lights. Turn off non-essential smart plugs. Turn off coffee maker. Set all thermostats to eco mode.
 - LEAVING: Lock front door. Turn off non-essential lights. Set thermostats to eco mode.
 - ARRIVING: Unlock front door. Turn on living room and kitchen main lights (brightness 80). Set thermostats to 72°F auto mode.
-- HOME: Ensure comfortable settings — main lights on (brightness 80), thermostat at 72°F auto.
+- HOME: Ensure comfortable settings — main lights on (brightness 80), thermostat at 72°F auto."""
 
-CRITICAL: NEVER turn off plug_kitchen_fridge (the fridge) — it is critical. Never turn off sensors or battery.
-
-DEVICE ACTION REFERENCE:
-- light: "on" (params: {{"brightness": 0-100}}), "off" (no params)
-- thermostat: "set_temperature" (params: {{"temperature": 60-85}}), "set_mode" (params: {{"mode": "heat|cool|auto|eco|off"}}), "eco_mode" (no params)
-- smart_plug: "on" (no params), "off" (no params)  — but NOT plug_kitchen_fridge
-- lock: "lock" (no params), "unlock" (no params)
-- coffee_maker: "on" (standby), "off" (no params), "brew" (params: {{"strength": "medium"}})
-- battery: "set_mode" (params: {{"mode": "charge|discharge|auto|backup"}})
-
-Respond with ONLY valid JSON:
-{{
+_LOCATION_RESPONSE = """Respond with ONLY valid JSON:
+{
     "reasoning": "Brief explanation",
     "actions": [
-        {{"device_id": "exact_id", "action": "action_name", "parameters": {{}}}}
+        {"device_id": "exact_id", "action": "action_name", "parameters": {}}
     ]
-}}"""
+}"""
+
+
+def _build_location_prompt(**kwargs: Any) -> str:
+    header = _LOCATION_HEADER.format(**kwargs)
+    return _build_prompt(
+        header,
+        _critical_text(),
+        _LOCATION_RULES,
+        "DEVICE ACTION REFERENCE:\n" + _action_ref(),
+        _LOCATION_RESPONSE,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Prompt: LLM-based calendar / home-mode response
 # ---------------------------------------------------------------------------
-CALENDAR_RESPONSE_PROMPT = """You are the smart home orchestrator. The home mode has changed based on the user's calendar.
+
+_CALENDAR_HEADER = """You are the smart home orchestrator. The home mode has changed based on the user's calendar.
 Decide EXACTLY which devices to adjust for the new mode. Be comprehensive but reasonable.
 
 NEW MODE: {new_mode}
@@ -172,9 +209,9 @@ USER LOCATION: {user_location}
 CURRENT TIME: {current_time}
 
 ALL AVAILABLE DEVICES (current state):
-{device_inventory}
+{device_inventory}"""
 
-MODE GUIDELINES:
+_CALENDAR_RULES = """MODE GUIDELINES:
 
 1. **preparing_for_meeting** (meeting starts in a few minutes):
    - Turn on office light at brightness 80
@@ -206,28 +243,29 @@ MODE GUIDELINES:
    - Comfortable temperature (70°F)
 
 6. **normal** (restore after any special mode):
-   - Restore lights to comfortable levels (living room 80, bedroom 60, office 50, kitchen 80)
+   - Restore lights to comfortable levels
    - Set thermostats to auto at 72°F
-   - Unlock front door if user is home
+   - Unlock front door if user is home"""
 
-CRITICAL: Use EXACT device_id values from the inventory. Never modify sensors or battery. NEVER turn off plug_kitchen_fridge (the fridge).
-
-DEVICE ACTION REFERENCE:
-- light: "on" (params: {{"brightness": 0-100}}), "off" (no params), "dim" (params: {{"brightness": 0-100}})
-- thermostat: "set_temperature" (params: {{"temperature": 60-85}}), "set_mode" (params: {{"mode": "heat|cool|auto|eco|off"}}), "eco_mode" (no params)
-- smart_plug: "on" (no params), "off" (no params) — but NOT plug_kitchen_fridge
-- lock: "lock" (no params), "unlock" (no params)
-- coffee_maker: "on" (standby), "off" (no params), "brew" (params: {{"strength": "medium"}})
-- battery: "set_mode" (params: {{"mode": "charge|discharge|auto|backup"}})
-
-Respond with ONLY valid JSON:
-{{
+_CALENDAR_RESPONSE = """Respond with ONLY valid JSON:
+{
     "reasoning": "Brief explanation of why these adjustments for this mode",
     "actions": [
-        {{"device_id": "exact_id", "action": "action_name", "parameters": {{}}}}
+        {"device_id": "exact_id", "action": "action_name", "parameters": {}}
     ],
     "voice_message": "Short friendly message to inform the user about the mode change (1 sentence)"
-}}"""
+}"""
+
+
+def _build_calendar_prompt(**kwargs: Any) -> str:
+    header = _CALENDAR_HEADER.format(**kwargs)
+    return _build_prompt(
+        header,
+        _critical_text(),
+        _CALENDAR_RULES,
+        "DEVICE ACTION REFERENCE:\n" + _action_ref(),
+        _CALENDAR_RESPONSE,
+    )
 
 
 class OrchestratorAgent(BaseAgent):
@@ -241,6 +279,10 @@ class OrchestratorAgent(BaseAgent):
         # Calendar / home-mode tracking
         self._current_home_mode: str = "normal"
         self._pre_mode_device_snapshot: dict[str, dict[str, Any]] | None = None
+        # Track currently handling threats to prevent duplicates
+        self._handling_threats: set[str] = set()  # Set of threat_keys currently being handled
+        # Track threats that have been informed about (to prevent re-notification)
+        self._informed_threats: dict[str, datetime] = {}  # threat_key -> timestamp when informed
 
     @property
     def decision_history(self) -> list[dict[str, Any]]:
@@ -283,6 +325,17 @@ class OrchestratorAgent(BaseAgent):
         try:
             while True:
                 await asyncio.sleep(10)
+                # Clean up old informed threats (older than 1 hour)
+                now = datetime.now()
+                expired_keys = [
+                    key for key, timestamp in self._informed_threats.items()
+                    if (now - timestamp).total_seconds() > 3600
+                ]
+                for key in expired_keys:
+                    del self._informed_threats[key]
+                if expired_keys:
+                    logger.debug(f"Cleaned up {len(expired_keys)} expired threat notifications")
+                
                 await self._check_and_respond()
         except asyncio.CancelledError:
             pass
@@ -298,7 +351,15 @@ class OrchestratorAgent(BaseAgent):
         """
         # --- 1. Threat level check ---
         assessment = threat_agent.latest_assessment
-        if assessment.threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL):
+        # Check if threat_level is HIGH or CRITICAL (handle both enum and string)
+        is_high_or_critical = False
+        if hasattr(assessment.threat_level, 'value'):
+            is_high_or_critical = assessment.threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL)
+        else:
+            threat_level_lower = str(assessment.threat_level).lower()
+            is_high_or_critical = threat_level_lower in ('high', 'critical')
+        
+        if is_high_or_critical:
             await self._handle_threat(assessment)
 
         # --- 2. Calendar context / home-mode transitions ---
@@ -345,18 +406,18 @@ class OrchestratorAgent(BaseAgent):
                 )
         return "\n".join(lines)
 
-    # Device IDs that must never be turned off by any automated plan
-    _PROTECTED_DEVICE_IDS = {"plug_kitchen_fridge"}
-
     async def _execute_action_plan(self, actions: list[dict]) -> tuple[list[str], list[str]]:
         """Execute a list of device actions from an LLM-generated plan.
 
         Before executing, checks:
-        1. Hardcoded protections (e.g. plug_kitchen_fridge must never be turned off)
+        1. Config-driven critical-device protections (derived from priority_tier)
         2. User-defined global constraints (e.g. "never unlock the door")
         """
         executed: list[str] = []
         failed: list[str] = []
+
+        # Derive protected IDs from the registry at call time
+        protected_ids = device_registry.get_critical_device_ids()
 
         # Build a dynamic block-list from user-defined global constraint patterns
         pattern_blocked = self._get_blocked_actions_from_patterns()
@@ -372,9 +433,9 @@ class OrchestratorAgent(BaseAgent):
                 failed.append(f"Invalid action spec: {action}")
                 continue
 
-            # Hard safety: never turn off protected devices regardless of LLM output
-            if device_id in self._PROTECTED_DEVICE_IDS and action_name == "off":
-                logger.warning(f"BLOCKED turning off protected device: {device_id}")
+            # Hard safety: never turn off critical-priority devices
+            if device_id in protected_ids and action_name == "off":
+                logger.warning(f"BLOCKED turning off critical device: {device_id}")
                 failed.append(f"{device_id}.off: BLOCKED (critical device)")
                 continue
 
@@ -411,55 +472,126 @@ class OrchestratorAgent(BaseAgent):
     # Threat handling
     # ------------------------------------------------------------------
 
+    def _get_threat_type_str(self, assessment) -> str:
+        """Extract threat_type as string, handling both enum and string values."""
+        if hasattr(assessment.threat_type, 'value'):
+            return assessment.threat_type.value
+        return str(assessment.threat_type)
+
+    def _get_threat_level_str(self, assessment) -> str:
+        """Extract threat_level as string, handling both enum and string values."""
+        if hasattr(assessment.threat_level, 'value'):
+            return assessment.threat_level.value
+        return str(assessment.threat_level)
+
+    async def handle_threat_assessment(self, assessment) -> None:
+        """Public method to handle a threat assessment (called by threat_agent).
+
+        This triggers voice alerts and permission requests automatically.
+        """
+        await self._handle_threat(assessment)
+
     async def _handle_threat(self, assessment) -> None:
         """Handle a detected threat — voice alert, then execute if approved."""
-        threat_key = f"{assessment.threat_type.value}_{assessment.threat_level.value}"
+        try:
+            # Handle both enum and string values for threat_level/threat_type
+            threat_type_val = self._get_threat_type_str(assessment)
+            threat_level_val = self._get_threat_level_str(assessment)
+            # Use a more unique key: type + level + summary hash to avoid duplicates
+            summary_hash = hash(assessment.summary) % 10000
+            threat_key = f"{threat_type_val}_{threat_level_val}_{summary_hash}"
 
-        # Avoid duplicate handling
-        recent_decisions = [d.get("threat_key") for d in self._decision_history[-5:]]
-        if threat_key in recent_decisions:
-            return
+            # Avoid duplicate handling - check both recent decisions and currently handling
+            recent_decisions = [d.get("threat_key") for d in self._decision_history[-10:]]
+            if threat_key in recent_decisions or threat_key in self._handling_threats:
+                logger.debug(f"Skipping duplicate threat handling: {threat_key}")
+                return
 
-        logger.info(f"Handling threat: {assessment.summary}")
+            # Check if we've already informed about this threat recently (within 30 minutes)
+            # This prevents re-notification when threat conditions persist
+            if threat_key in self._informed_threats:
+                informed_time = self._informed_threats[threat_key]
+                time_since_informed = (datetime.now() - informed_time).total_seconds()
+                if time_since_informed < 1800:  # 30 minutes
+                    logger.debug(
+                        f"Already informed about threat {threat_key} {int(time_since_informed/60)} minutes ago, skipping notification"
+                    )
+                    # Still allow actions if user explicitly requests, but skip voice alert
+                    return
 
-        needs_permission = assessment.requires_user_permission()
+            # Mark as currently handling and as informed
+            self._handling_threats.add(threat_key)
+            self._informed_threats[threat_key] = datetime.now()
+            logger.info(f"Handling threat: {assessment.summary}")
 
-        # Voice alert with natural language script
-        voice_result = await voice_agent.run(
-            message=assessment.summary,
-            require_permission=needs_permission,
-            threat_summary=assessment.summary,
-            threat_level=assessment.threat_level.value,
-            actions=assessment.recommended_actions[:4],
-        )
+            needs_permission = assessment.requires_user_permission()
+        except Exception as e:
+            logger.error(f"Error in _handle_threat (early): {e}", exc_info=True)
+            raise
 
-        if needs_permission:
-            approved = voice_result.get("approved", False)
-            if approved:
-                logger.info("User approved threat response — executing actions")
-                await self._execute_threat_response(assessment)
+        try:
+            # Voice alert with natural language script
+            threat_level_str = threat_level_val  # Already extracted above
+            voice_result = await voice_agent.run(
+                message=assessment.summary,
+                require_permission=needs_permission,
+                threat_summary=assessment.summary,
+                threat_level=threat_level_str,
+                actions=assessment.recommended_actions[:4],
+            )
+
+            if needs_permission:
+                approved = voice_result.get("approved", False)
+                user_instructions = voice_result.get("user_instructions", "")
+                user_response = voice_result.get("user_response", {})
+                raw_user_text = user_response.get("user_text", "") if isinstance(user_response, dict) else ""
+                
+                logger.info(
+                    f"User response: approved={approved}, "
+                    f"instructions='{user_instructions}', "
+                    f"raw_text='{raw_user_text}'"
+                )
+                
+                if approved:
+                    if user_instructions:
+                        logger.info(f"User approved with modifications: {user_instructions}")
+                        # Parse user instructions and modify the action plan
+                        await self._execute_threat_response_with_modifications(
+                            assessment, user_instructions
+                        )
+                    else:
+                        logger.info("User approved threat response — executing actions")
+                        await self._execute_threat_response(assessment)
+                else:
+                    logger.info("User denied threat response actions")
             else:
-                logger.info("User denied threat response actions")
-        else:
-            await self._execute_threat_response(assessment)
+                await self._execute_threat_response(assessment)
 
-        self._decision_history.append({
-            "threat_key": threat_key,
-            "assessment": assessment.summary,
-            "actions_executed": voice_result.get("approved", not needs_permission),
-            "timestamp": assessment.timestamp.isoformat(),
-        })
+            self._decision_history.append({
+                "threat_key": threat_key,
+                "assessment": assessment.summary,
+                "actions_executed": voice_result.get("approved", not needs_permission),
+                "user_instructions": voice_result.get("user_instructions", ""),
+                "timestamp": assessment.timestamp.isoformat(),
+            })
+        finally:
+            # Always remove from handling set when done
+            self._handling_threats.discard(threat_key)
 
     async def _execute_threat_response(self, assessment) -> None:
         """Use LLM to dynamically plan and execute threat response based on all available devices."""
         device_inventory = self._build_device_inventory()
 
-        # Look up user-defined patterns for this threat type
-        user_patterns_text = self._format_user_patterns("threat", assessment.threat_type.value)
+        # Handle both enum and string values
+        threat_type_val = self._get_threat_type_str(assessment)
+        threat_level_val = self._get_threat_level_str(assessment)
 
-        prompt = THREAT_RESPONSE_PROMPT.format(
-            threat_level=assessment.threat_level.value,
-            threat_type=assessment.threat_type.value,
+        # Look up user-defined patterns for this threat type
+        user_patterns_text = self._format_user_patterns("threat", threat_type_val)
+
+        prompt = _build_threat_prompt(
+            threat_level=threat_level_val,
+            threat_type=threat_type_val,
             threat_summary=assessment.summary,
             threat_reasoning=assessment.reasoning,
             device_inventory=device_inventory,
@@ -517,121 +649,241 @@ class OrchestratorAgent(BaseAgent):
             logger.error(f"LLM-based threat response failed: {e}", exc_info=True)
             await self._fallback_threat_response(assessment)
 
+    async def _execute_threat_response_with_modifications(
+        self, assessment, user_instructions: str
+    ) -> None:
+        """Execute threat response with user-specified modifications to the action plan.
+        
+        Parses the user's natural language instructions (e.g., "only turn up the heat")
+        and modifies the LLM-generated action plan accordingly.
+        """
+        device_inventory = self._build_device_inventory()
+        threat_type_val = self._get_threat_type_str(assessment)
+        threat_level_val = self._get_threat_level_str(assessment)
+
+        # First, get the base threat response plan
+        user_patterns_text = self._format_user_patterns("threat", threat_type_val)
+        base_prompt = _build_threat_prompt(
+            threat_level=threat_level_val,
+            threat_type=threat_type_val,
+            threat_summary=assessment.summary,
+            threat_reasoning=assessment.reasoning,
+            device_inventory=device_inventory,
+            user_location=user_info_agent.location.value,
+        )
+
+        global_constraints = self._format_global_constraints()
+        if global_constraints:
+            base_prompt += (
+                "\n\n⚠ MANDATORY USER RULES (these override all other guidelines — "
+                "violating these is FORBIDDEN):\n"
+                f"{global_constraints}"
+            )
+
+        if user_patterns_text != "None":
+            base_prompt += (
+                "\n\nCONTEXTUAL PREFERENCES (honour these for this threat):\n"
+                f"{user_patterns_text}"
+            )
+
+        # Add user modification instructions
+        modification_prompt = f"""
+CRITICAL: USER HAS PROVIDED SPECIFIC MODIFICATIONS TO THE ACTION PLAN
+
+USER SAID: "{user_instructions}"
+
+ABSOLUTE RULE: The user's instructions COMPLETELY OVERRIDE the default threat response plan.
+You MUST follow these instructions EXACTLY. No exceptions.
+
+DETECTING ASSERTION WORDS:
+Check if the user's instruction contains ANY of these assertion words: "only", "just", "solely", "exclusively", "merely", "simply"
+If YES → This is an ASSERTED instruction. You MUST execute ONLY what the user explicitly mentioned. ALL other actions must be REMOVED.
+
+STEP-BY-STEP PROCESS:
+1. Parse the user instruction: "{user_instructions}"
+2. Check for assertion words: "only", "just", "solely", "exclusively", "merely", "simply"
+3. If assertion words found:
+   - Identify what the user wants (e.g., "turn up the heat" = thermostat actions)
+   - Create a NEW action plan with ONLY those specific actions
+   - REMOVE all other actions from the plan
+4. If no assertion words:
+   - Follow the instruction as a modification (add/remove specific actions)
+
+OUTPUT REQUIREMENTS:
+- Return ONLY the actions that match the user's asserted instruction
+- If user says "only X", return actions for X ONLY
+- Do NOT include any actions that are not explicitly mentioned in the user's instruction
+- If you're unsure, err on the side of including FEWER actions, not more
+
+Generate the MODIFIED action plan now. Remember: If the user used assertion words, ONLY include the explicitly mentioned actions.
+"""
+
+        prompt = base_prompt + modification_prompt
+
+        try:
+            result = await llm_client.chat_json(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+
+            if "error" in result and "actions" not in result:
+                logger.warning(f"LLM failed for modified threat response: {result.get('error')}")
+                # Fallback to base plan
+                await self._execute_threat_response(assessment)
+                return
+
+            reasoning = result.get("reasoning", "")
+            actions = result.get("actions", [])
+
+            # Safety check: If user instruction contains assertion words, filter actions
+            assertion_words = ["only", "just", "solely", "exclusively", "merely", "simply"]
+            user_lower = user_instructions.lower()
+            has_assertion = any(word in user_lower for word in assertion_words)
+            
+            if has_assertion:
+                # Extract what the user wants (e.g., "heat", "thermostat", "temperature")
+                # Filter actions to only include those related to what the user mentioned
+                filtered_actions = []
+                user_keywords = []
+                
+                # Extract keywords from user instruction
+                if "heat" in user_lower or "temperature" in user_lower or "thermostat" in user_lower or "warm" in user_lower:
+                    user_keywords.extend(["thermostat", "heat", "temperature", "warm", "cool"])
+                if "light" in user_lower:
+                    user_keywords.append("light")
+                if "lock" in user_lower or "door" in user_lower:
+                    user_keywords.extend(["lock", "door"])
+                if "plug" in user_lower or "appliance" in user_lower or "device" in user_lower:
+                    user_keywords.extend(["plug", "appliance"])
+                
+                # Filter actions based on device type and action name
+                for action in actions:
+                    device_id = action.get("device_id", "")
+                    action_name = action.get("action", "")
+                    device = device_registry.get_device(device_id)
+                    
+                    if device:
+                        device_type = device.device_type.value.lower()
+                        device_name = device.state.display_name.lower()
+                        
+                        # Check if this action matches what the user wants
+                        matches = False
+                        for keyword in user_keywords:
+                            if keyword in device_type or keyword in device_name or keyword in action_name:
+                                matches = True
+                                break
+                        
+                        if matches:
+                            filtered_actions.append(action)
+                        else:
+                            logger.debug(
+                                f"Filtered out action {device_id}.{action_name} - not matching user instruction"
+                            )
+                
+                if filtered_actions:
+                    logger.info(
+                        f"Assertion detected: Filtered {len(actions)} actions down to {len(filtered_actions)} "
+                        f"based on user instruction: {user_instructions}"
+                    )
+                    actions = filtered_actions
+                else:
+                    logger.warning(
+                        f"Assertion detected but no matching actions found. "
+                        f"User said: {user_instructions}, keywords: {user_keywords}"
+                    )
+
+            logger.info(
+                f"LLM planned {len(actions)} modified threat response actions: {reasoning}"
+            )
+
+            executed, failed = await self._execute_action_plan(actions)
+
+            logger.info(
+                f"Modified threat response complete: {len(executed)} executed, {len(failed)} failed"
+            )
+            if failed:
+                logger.warning(f"Failed actions: {failed}")
+
+            await ws_manager.broadcast("orchestrator_action", {
+                "type": "threat_response_modified",
+                "assessment": assessment.summary,
+                "user_instructions": user_instructions,
+                "reasoning": reasoning,
+                "actions_executed": executed,
+                "actions_failed": failed,
+            })
+
+        except Exception as e:
+            logger.error(f"LLM-based modified threat response failed: {e}", exc_info=True)
+            # Fallback to base plan
+            await self._execute_threat_response(assessment)
+
     async def _fallback_threat_response(self, assessment) -> None:
-        """Rule-based fallback when LLM is unavailable for threat response."""
+        """Rule-based fallback when LLM is unavailable for threat response.
+
+        Uses device registry queries instead of hardcoded device IDs.
+        """
         executed: list[str] = []
-        threat_type = assessment.threat_type.value
+        threat_type = self._get_threat_type_str(assessment)
         pattern_blocked = self._get_blocked_actions_from_patterns()
+
+        async def _set_all_thermostats(temp: int, mode: str) -> None:
+            for d in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
+                await home_state_agent.execute_action(
+                    d.device_id, "set_temperature", {"temperature": temp}
+                )
+                r = await home_state_agent.execute_action(
+                    d.device_id, "set_mode", {"mode": mode}
+                )
+                if r.get("success"):
+                    executed.append(f"{d.device_id}.{mode}({temp})")
+
+        async def _turn_off_non_essential(include_medium: bool = False) -> None:
+            for d in device_registry.get_non_essential_devices(include_medium=include_medium):
+                if self._is_action_blocked(d.device_id, "off", pattern_blocked):
+                    continue
+                r = await home_state_agent.execute_action(d.device_id, "off")
+                if r.get("success"):
+                    executed.append(f"{d.device_id}.off")
+
+        async def _battery_action(mode: str) -> None:
+            for d in device_registry.get_devices_by_type(DeviceType.BATTERY):
+                r = await home_state_agent.execute_action(
+                    d.device_id, "set_mode", {"mode": mode}
+                )
+                if r.get("success"):
+                    executed.append(f"{d.device_id}.{mode}")
+
+        async def _lock_all_doors() -> None:
+            for d in device_registry.get_devices_by_type(DeviceType.LOCK):
+                if self._is_action_blocked(d.device_id, "lock", pattern_blocked):
+                    continue
+                r = await home_state_agent.execute_action(d.device_id, "lock")
+                if r.get("success"):
+                    executed.append(f"{d.device_id}.lock")
 
         try:
             if threat_type == "heat_wave":
-                # Pre-cool all thermostats
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    await home_state_agent.execute_action(
-                        device.device_id, "set_temperature", {"temperature": 68}
-                    )
-                    r = await home_state_agent.execute_action(
-                        device.device_id, "set_mode", {"mode": "cool"}
-                    )
-                    if r.get("success"):
-                        executed.append(f"{device.device_id}.cool(68)")
-
-                # Turn off non-essential lights and plugs
-                for device in device_registry.devices.values():
-                    if (
-                        device.state.priority_tier in (PriorityTier.LOW, PriorityTier.OPTIONAL)
-                        and device.state.power
-                        and device.device_type
-                        not in (DeviceType.SENSOR, DeviceType.BATTERY, DeviceType.LOCK)
-                    ):
-                        if self._is_action_blocked(device.device_id, "off", pattern_blocked):
-                            continue
-                        r = await home_state_agent.execute_action(device.device_id, "off")
-                        if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
-
-                # Charge battery
-                r = await home_state_agent.execute_action(
-                    "battery_main", "set_mode", {"mode": "charge"}
-                )
-                if r.get("success"):
-                    executed.append("battery_main.charge")
+                await _set_all_thermostats(68, "cool")
+                await _turn_off_non_essential()
+                await _battery_action("charge")
 
             elif threat_type == "grid_strain":
-                # Eco mode on thermostats
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    r = await home_state_agent.execute_action(device.device_id, "eco_mode")
+                for d in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
+                    r = await home_state_agent.execute_action(d.device_id, "eco_mode")
                     if r.get("success"):
-                        executed.append(f"{device.device_id}.eco_mode")
-
-                # Turn off non-essential devices (low + medium priority)
-                for device in device_registry.devices.values():
-                    if (
-                        device.state.priority_tier
-                        in (PriorityTier.LOW, PriorityTier.OPTIONAL, PriorityTier.MEDIUM)
-                        and device.state.power
-                        and device.device_type
-                        not in (DeviceType.THERMOSTAT, DeviceType.SENSOR, DeviceType.BATTERY, DeviceType.LOCK)
-                    ):
-                        if self._is_action_blocked(device.device_id, "off", pattern_blocked):
-                            continue
-                        r = await home_state_agent.execute_action(device.device_id, "off")
-                        if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
-
-                # Battery backup
-                r = await home_state_agent.execute_action(
-                    "battery_main", "set_mode", {"mode": "backup"}
-                )
-                if r.get("success"):
-                    executed.append("battery_main.backup")
+                        executed.append(f"{d.device_id}.eco_mode")
+                await _turn_off_non_essential(include_medium=True)
+                await _battery_action("backup")
 
             elif threat_type == "cold_snap":
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    await home_state_agent.execute_action(
-                        device.device_id, "set_temperature", {"temperature": 72}
-                    )
-                    r = await home_state_agent.execute_action(
-                        device.device_id, "set_mode", {"mode": "heat"}
-                    )
-                    if r.get("success"):
-                        executed.append(f"{device.device_id}.heat(72)")
-
-                r = await home_state_agent.execute_action(
-                    "battery_main", "set_mode", {"mode": "charge"}
-                )
-                if r.get("success"):
-                    executed.append("battery_main.charge")
+                await _set_all_thermostats(72, "heat")
+                await _battery_action("charge")
 
             elif threat_type in ("storm", "power_outage"):
-                # Lock doors
-                for device in device_registry.get_devices_by_type(DeviceType.LOCK):
-                    if self._is_action_blocked(device.device_id, "lock", pattern_blocked):
-                        continue
-                    r = await home_state_agent.execute_action(device.device_id, "lock")
-                    if r.get("success"):
-                        executed.append(f"{device.device_id}.lock")
-
-                # Battery backup
-                r = await home_state_agent.execute_action(
-                    "battery_main", "set_mode", {"mode": "backup"}
-                )
-                if r.get("success"):
-                    executed.append("battery_main.backup")
-
-                # Turn off non-essential devices
-                for device in device_registry.devices.values():
-                    if (
-                        device.state.priority_tier in (PriorityTier.LOW, PriorityTier.OPTIONAL)
-                        and device.state.power
-                        and device.device_type
-                        not in (DeviceType.SENSOR, DeviceType.BATTERY, DeviceType.LOCK)
-                    ):
-                        if self._is_action_blocked(device.device_id, "off", pattern_blocked):
-                            continue
-                        r = await home_state_agent.execute_action(device.device_id, "off")
-                        if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
+                await _lock_all_doors()
+                await _battery_action("backup")
+                await _turn_off_non_essential()
 
         except Exception as e:
             logger.error(f"Fallback threat response error: {e}", exc_info=True)
@@ -821,7 +1073,7 @@ class OrchestratorAgent(BaseAgent):
         # Look up user-defined patterns for this mode
         user_patterns_text = self._format_user_patterns("calendar_mode", new_mode)
 
-        prompt = CALENDAR_RESPONSE_PROMPT.format(
+        prompt = _build_calendar_prompt(
             new_mode=new_mode,
             old_mode=old_mode,
             calendar_context=str(cal_ctx),
@@ -893,141 +1145,137 @@ class OrchestratorAgent(BaseAgent):
             await self._fallback_mode_transition(old_mode, new_mode)
 
     async def _fallback_mode_transition(self, old_mode: str, new_mode: str) -> None:
-        """Rule-based fallback for mode transitions when LLM is unavailable."""
+        """Rule-based fallback for mode transitions when LLM is unavailable.
+
+        Uses device registry queries instead of hardcoded device IDs.
+        """
         executed: list[str] = []
         pattern_blocked = self._get_blocked_actions_from_patterns()
 
-        try:
-            if new_mode == "preparing_for_meeting":
-                # Office light on, dim other lights, lock door
+        # ---- Reusable helpers (scope-local) ----
+        async def _set_all_thermostats(temp: int, mode: str) -> None:
+            for d in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
+                await home_state_agent.execute_action(
+                    d.device_id, "set_temperature", {"temperature": temp}
+                )
                 r = await home_state_agent.execute_action(
-                    "light_office_main", "on", {"brightness": 80}
+                    d.device_id, "set_mode", {"mode": mode}
                 )
                 if r.get("success"):
-                    executed.append("light_office_main.on(80)")
+                    executed.append(f"{d.device_id}.{mode}({temp})")
 
-                for lid in ("light_living_main", "light_bedroom_main", "light_kitchen_main"):
-                    r = await home_state_agent.execute_action(lid, "dim", {"brightness": 30})
+        async def _lock_all() -> None:
+            for d in device_registry.get_devices_by_type(DeviceType.LOCK):
+                r = await home_state_agent.execute_action(d.device_id, "lock")
+                if r.get("success"):
+                    executed.append(f"{d.device_id}.lock")
+
+        try:
+            if new_mode == "preparing_for_meeting":
+                # Office light on
+                office_light = device_registry.get_first_device_of_type(DeviceType.LIGHT, room="office")
+                if office_light:
+                    r = await home_state_agent.execute_action(
+                        office_light.device_id, "on", {"brightness": 80}
+                    )
                     if r.get("success"):
-                        executed.append(f"{lid}.dim(30)")
+                        executed.append(f"{office_light.device_id}.on(80)")
 
-                for device in device_registry.get_devices_by_type(DeviceType.LOCK):
-                    r = await home_state_agent.execute_action(device.device_id, "lock")
-                    if r.get("success"):
-                        executed.append(f"{device.device_id}.lock")
+                # Dim non-office lights
+                for d in device_registry.get_devices_by_type(DeviceType.LIGHT):
+                    if d.state.room != "office" and d.state.power:
+                        r = await home_state_agent.execute_action(
+                            d.device_id, "dim", {"brightness": 30}
+                        )
+                        if r.get("success"):
+                            executed.append(f"{d.device_id}.dim(30)")
 
+                await _lock_all()
                 await voice_agent.run(
                     message="Your meeting starts soon. I've set up the office and dimmed other lights.",
                     require_permission=False,
                 )
 
             elif new_mode in ("do_not_disturb", "focus"):
-                # Office light stable, everything else off, eco mode
-                r = await home_state_agent.execute_action(
-                    "light_office_main", "on", {"brightness": 70}
-                )
-                if r.get("success"):
-                    executed.append("light_office_main.on(70)")
-
-                for device in device_registry.get_devices_by_type(DeviceType.LIGHT):
-                    if device.device_id != "light_office_main" and device.state.power:
-                        r = await home_state_agent.execute_action(device.device_id, "off")
-                        if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
-
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    if "office" not in device.device_id:
-                        r = await home_state_agent.execute_action(device.device_id, "eco_mode")
-                        if r.get("success"):
-                            executed.append(f"{device.device_id}.eco_mode")
-
-                for device in device_registry.get_devices_by_type(DeviceType.LOCK):
-                    r = await home_state_agent.execute_action(device.device_id, "lock")
+                # Office light stable
+                office_light = device_registry.get_first_device_of_type(DeviceType.LIGHT, room="office")
+                if office_light:
+                    brightness = 70 if new_mode == "do_not_disturb" else 90
+                    r = await home_state_agent.execute_action(
+                        office_light.device_id, "on", {"brightness": brightness}
+                    )
                     if r.get("success"):
-                        executed.append(f"{device.device_id}.lock")
+                        executed.append(f"{office_light.device_id}.on({brightness})")
 
-                for device in device_registry.get_devices_by_type(DeviceType.COFFEE_MAKER):
-                    if device.state.power:
-                        r = await home_state_agent.execute_action(device.device_id, "off")
+                # Non-office lights off
+                for d in device_registry.get_devices_by_type(DeviceType.LIGHT):
+                    if d.state.room != "office" and d.state.power:
+                        r = await home_state_agent.execute_action(d.device_id, "off")
                         if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
+                            executed.append(f"{d.device_id}.off")
+
+                # Non-office thermostats to eco
+                for d in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
+                    if d.state.room != "office":
+                        r = await home_state_agent.execute_action(d.device_id, "eco_mode")
+                        if r.get("success"):
+                            executed.append(f"{d.device_id}.eco_mode")
+
+                await _lock_all()
+
+                # Turn off coffee maker(s) and non-essential plugs
+                for d in device_registry.get_non_essential_devices():
+                    if self._is_action_blocked(d.device_id, "off", pattern_blocked):
+                        continue
+                    r = await home_state_agent.execute_action(d.device_id, "off")
+                    if r.get("success"):
+                        executed.append(f"{d.device_id}.off")
 
             elif new_mode == "sleep":
-                # All lights off, lock doors, lower thermostat
-                for device in device_registry.get_devices_by_type(DeviceType.LIGHT):
-                    if device.state.power:
-                        r = await home_state_agent.execute_action(device.device_id, "off")
+                # All lights off
+                for d in device_registry.get_devices_by_type(DeviceType.LIGHT):
+                    if d.state.power:
+                        r = await home_state_agent.execute_action(d.device_id, "off")
                         if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
+                            executed.append(f"{d.device_id}.off")
 
-                for device in device_registry.get_devices_by_type(DeviceType.LOCK):
-                    r = await home_state_agent.execute_action(device.device_id, "lock")
-                    if r.get("success"):
-                        executed.append(f"{device.device_id}.lock")
-
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    await home_state_agent.execute_action(
-                        device.device_id, "set_temperature", {"temperature": 68}
-                    )
-                    r = await home_state_agent.execute_action(
-                        device.device_id, "set_mode", {"mode": "auto"}
-                    )
-                    if r.get("success"):
-                        executed.append(f"{device.device_id}.auto(68)")
+                await _lock_all()
+                await _set_all_thermostats(68, "auto")
 
             elif new_mode == "active":
-                # Bright lights in living room, comfortable temp
-                r = await home_state_agent.execute_action(
-                    "light_living_main", "on", {"brightness": 90}
-                )
-                if r.get("success"):
-                    executed.append("light_living_main.on(90)")
-
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    await home_state_agent.execute_action(
-                        device.device_id, "set_temperature", {"temperature": 70}
-                    )
+                # Bright lights in living room
+                living_light = device_registry.get_first_device_of_type(DeviceType.LIGHT, room="living_room")
+                if living_light:
                     r = await home_state_agent.execute_action(
-                        device.device_id, "set_mode", {"mode": "auto"}
+                        living_light.device_id, "on", {"brightness": 90}
                     )
                     if r.get("success"):
-                        executed.append(f"{device.device_id}.auto(70)")
+                        executed.append(f"{living_light.device_id}.on(90)")
+
+                await _set_all_thermostats(70, "auto")
 
             elif new_mode == "normal":
-                # Restore from snapshot if available, otherwise set comfortable defaults
+                # Restore from snapshot if available
                 if self._pre_mode_device_snapshot:
                     executed = await self._restore_from_snapshot()
                 else:
-                    # Comfortable defaults
-                    default_lights = {
-                        "light_living_main": 80,
-                        "light_bedroom_main": 60,
-                        "light_office_main": 50,
-                        "light_kitchen_main": 80,
-                    }
-                    for lid, brightness in default_lights.items():
+                    # Comfortable defaults: turn on all lights at moderate brightness
+                    for d in device_registry.get_devices_by_type(DeviceType.LIGHT):
+                        brightness = 80 if d.state.room in ("living_room", "kitchen") else 60
                         r = await home_state_agent.execute_action(
-                            lid, "on", {"brightness": brightness}
+                            d.device_id, "on", {"brightness": brightness}
                         )
                         if r.get("success"):
-                            executed.append(f"{lid}.on({brightness})")
+                            executed.append(f"{d.device_id}.on({brightness})")
 
-                    for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                        await home_state_agent.execute_action(
-                            device.device_id, "set_temperature", {"temperature": 72}
-                        )
-                        r = await home_state_agent.execute_action(
-                            device.device_id, "set_mode", {"mode": "auto"}
-                        )
-                        if r.get("success"):
-                            executed.append(f"{device.device_id}.auto(72)")
+                    await _set_all_thermostats(72, "auto")
 
-                    # Unlock front door (user is home and meeting is over)
-                    for device in device_registry.get_devices_by_type(DeviceType.LOCK):
-                        if user_info_agent.location.value == "home":
-                            r = await home_state_agent.execute_action(device.device_id, "unlock")
+                    # Unlock doors if user is home
+                    if user_info_agent.location.value == "home":
+                        for d in device_registry.get_devices_by_type(DeviceType.LOCK):
+                            r = await home_state_agent.execute_action(d.device_id, "unlock")
                             if r.get("success"):
-                                executed.append(f"{device.device_id}.unlock")
+                                executed.append(f"{d.device_id}.unlock")
 
                 await voice_agent.run(
                     message="Your meeting has ended. I've restored the house to normal.",
@@ -1130,7 +1378,7 @@ class OrchestratorAgent(BaseAgent):
         # Look up user-defined patterns for this location
         user_patterns_text = self._format_user_patterns("location", new_location)
 
-        prompt = LOCATION_RESPONSE_PROMPT.format(
+        prompt = _build_location_prompt(
             current_location=new_location,
             device_inventory=device_inventory,
         )
@@ -1206,111 +1454,94 @@ class OrchestratorAgent(BaseAgent):
             await self._fallback_location_response(new_location)
 
     def _is_action_blocked(self, device_id: str, action_name: str, pattern_blocked: dict[str, set[str]]) -> bool:
-        """Check if an action is blocked by hardcoded protections or user constraints."""
-        if device_id in self._PROTECTED_DEVICE_IDS and action_name == "off":
+        """Check if an action is blocked by config-driven protections or user constraints."""
+        critical_ids = device_registry.get_critical_device_ids()
+        if device_id in critical_ids and action_name == "off":
             return True
         if device_id in pattern_blocked and action_name in pattern_blocked[device_id]:
             return True
         return False
 
     async def _fallback_location_response(self, location: str) -> None:
-        """Rule-based fallback for location changes when LLM is unavailable."""
+        """Rule-based fallback for location changes when LLM is unavailable.
+
+        Uses device registry queries instead of hardcoded device IDs.
+        """
         executed: list[str] = []
         pattern_blocked = self._get_blocked_actions_from_patterns()
+
+        async def _set_all_thermostats(temp: int, mode: str) -> None:
+            for d in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
+                if self._is_action_blocked(d.device_id, mode, pattern_blocked):
+                    continue
+                await home_state_agent.execute_action(
+                    d.device_id, "set_temperature", {"temperature": temp}
+                )
+                r = await home_state_agent.execute_action(
+                    d.device_id, "set_mode", {"mode": mode}
+                )
+                if r.get("success"):
+                    executed.append(f"{d.device_id}.{mode}({temp})")
 
         try:
             if location in ("away", "leaving"):
                 # Lock doors
-                for device in device_registry.get_devices_by_type(DeviceType.LOCK):
-                    if self._is_action_blocked(device.device_id, "lock", pattern_blocked):
-                        logger.info(f"Skipping {device.device_id}.lock (blocked by constraint)")
+                for d in device_registry.get_devices_by_type(DeviceType.LOCK):
+                    if self._is_action_blocked(d.device_id, "lock", pattern_blocked):
+                        logger.info(f"Skipping {d.device_id}.lock (blocked by constraint)")
                         continue
-                    r = await home_state_agent.execute_action(device.device_id, "lock")
+                    r = await home_state_agent.execute_action(d.device_id, "lock")
                     if r.get("success"):
-                        executed.append(f"{device.device_id}.lock")
+                        executed.append(f"{d.device_id}.lock")
 
                 # Turn off ALL lights
-                for device in device_registry.get_devices_by_type(DeviceType.LIGHT):
-                    if device.state.power:
-                        if self._is_action_blocked(device.device_id, "off", pattern_blocked):
-                            logger.info(f"Skipping {device.device_id}.off (blocked by constraint)")
+                for d in device_registry.get_devices_by_type(DeviceType.LIGHT):
+                    if d.state.power:
+                        if self._is_action_blocked(d.device_id, "off", pattern_blocked):
                             continue
-                        r = await home_state_agent.execute_action(device.device_id, "off")
+                        r = await home_state_agent.execute_action(d.device_id, "off")
                         if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
+                            executed.append(f"{d.device_id}.off")
 
-                # Turn off non-critical smart plugs
-                for device in device_registry.get_devices_by_type(DeviceType.SMART_PLUG):
-                    if (
-                        device.state.priority_tier != PriorityTier.CRITICAL
-                        and device.state.power
-                    ):
-                        if self._is_action_blocked(device.device_id, "off", pattern_blocked):
-                            logger.info(f"Skipping {device.device_id}.off (blocked by constraint)")
-                            continue
-                        r = await home_state_agent.execute_action(device.device_id, "off")
-                        if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
-
-                # Turn off coffee maker
-                for device in device_registry.get_devices_by_type(DeviceType.COFFEE_MAKER):
-                    if device.state.power:
-                        if self._is_action_blocked(device.device_id, "off", pattern_blocked):
-                            logger.info(f"Skipping {device.device_id}.off (blocked by constraint)")
-                            continue
-                        r = await home_state_agent.execute_action(device.device_id, "off")
-                        if r.get("success"):
-                            executed.append(f"{device.device_id}.off")
+                # Turn off non-critical smart plugs, coffee maker, etc.
+                for d in device_registry.get_non_essential_devices():
+                    if self._is_action_blocked(d.device_id, "off", pattern_blocked):
+                        continue
+                    r = await home_state_agent.execute_action(d.device_id, "off")
+                    if r.get("success"):
+                        executed.append(f"{d.device_id}.off")
 
                 # Eco mode on thermostats
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    if self._is_action_blocked(device.device_id, "eco_mode", pattern_blocked):
-                        logger.info(f"Skipping {device.device_id}.eco_mode (blocked by constraint)")
+                for d in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
+                    if self._is_action_blocked(d.device_id, "eco_mode", pattern_blocked):
                         continue
-                    r = await home_state_agent.execute_action(device.device_id, "eco_mode")
+                    r = await home_state_agent.execute_action(d.device_id, "eco_mode")
                     if r.get("success"):
-                        executed.append(f"{device.device_id}.eco_mode")
+                        executed.append(f"{d.device_id}.eco_mode")
 
             elif location == "arriving":
-                # Unlock front door
-                for device in device_registry.get_devices_by_type(DeviceType.LOCK):
-                    if self._is_action_blocked(device.device_id, "unlock", pattern_blocked):
-                        logger.info(f"Skipping {device.device_id}.unlock (blocked by constraint)")
+                # Unlock doors
+                for d in device_registry.get_devices_by_type(DeviceType.LOCK):
+                    if self._is_action_blocked(d.device_id, "unlock", pattern_blocked):
                         continue
-                    r = await home_state_agent.execute_action(device.device_id, "unlock")
+                    r = await home_state_agent.execute_action(d.device_id, "unlock")
                     if r.get("success"):
-                        executed.append(f"{device.device_id}.unlock")
+                        executed.append(f"{d.device_id}.unlock")
 
-                # Turn on main lights
-                for device_id in ["light_living_main", "light_kitchen_main"]:
-                    r = await home_state_agent.execute_action(
-                        device_id, "on", {"brightness": 80}
-                    )
-                    if r.get("success"):
-                        executed.append(f"{device_id}.on(80)")
+                # Turn on main lights in key rooms
+                for room in ("living_room", "kitchen"):
+                    d = device_registry.get_first_device_of_type(DeviceType.LIGHT, room=room)
+                    if d:
+                        r = await home_state_agent.execute_action(
+                            d.device_id, "on", {"brightness": 80}
+                        )
+                        if r.get("success"):
+                            executed.append(f"{d.device_id}.on(80)")
 
-                # Restore thermostat to comfortable
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    await home_state_agent.execute_action(
-                        device.device_id, "set_temperature", {"temperature": 72}
-                    )
-                    r = await home_state_agent.execute_action(
-                        device.device_id, "set_mode", {"mode": "auto"}
-                    )
-                    if r.get("success"):
-                        executed.append(f"{device.device_id}.auto(72)")
+                await _set_all_thermostats(72, "auto")
 
             elif location == "home":
-                # Ensure comfortable settings
-                for device in device_registry.get_devices_by_type(DeviceType.THERMOSTAT):
-                    await home_state_agent.execute_action(
-                        device.device_id, "set_temperature", {"temperature": 72}
-                    )
-                    r = await home_state_agent.execute_action(
-                        device.device_id, "set_mode", {"mode": "auto"}
-                    )
-                    if r.get("success"):
-                        executed.append(f"{device.device_id}.auto(72)")
+                await _set_all_thermostats(72, "auto")
 
         except Exception as e:
             logger.error(f"Fallback location response error: {e}", exc_info=True)
@@ -1481,7 +1712,7 @@ class OrchestratorAgent(BaseAgent):
                 ][:10]),
             }
 
-            prompt = ORCHESTRATOR_PROMPT.format(request=request, **context)
+            prompt = _build_orchestrator_prompt(request=request, **context)
 
             # Inject global constraints
             global_constraints = self._format_global_constraints()

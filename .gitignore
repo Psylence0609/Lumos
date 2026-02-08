@@ -13,3 +13,4 @@ frontend/dist/
 *.docx
 certs/
 token.json
+.DS_Store

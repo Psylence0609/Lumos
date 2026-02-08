@@ -22,8 +22,43 @@
   --radius: 0.5rem;
 }
 
+html {
+  /* Safe area for notched phones (e.g. iPhone) */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
 body {
   background-color: var(--color-background);
   color: var(--color-foreground);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  /* Prevent overscroll / rubber-band on iOS */
+  overscroll-behavior-y: none;
+}
+
+/* Touch-friendly: allow tap highlight and smooth scroll on mobile */
+@media (pointer: coarse) {
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* 60fps: promote animated layout children to compositor layer */
+.layout-animate-root > * {
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+/* Smoother transitions: cubic-bezier close to linear end for buttery finish */
+.smooth-transition {
+  transition-timing-function: cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+/* Hide scrollbar for horizontal scroll strips */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
 }

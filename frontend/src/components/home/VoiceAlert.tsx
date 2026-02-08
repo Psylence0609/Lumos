@@ -23,9 +23,77 @@ const DENY_WORDS = ["no", "nah", "nope", "deny", "denied", "don't", "stop", "can
 /** How long (ms) to keep an info-only alert visible after audio finishes */
 const AUTO_DISMISS_DELAY = 4000;
 
+/* inject keyframes */
+const cssId = "va-anim-css";
+const css = `
+@keyframes va-bar { 0%,100%{height:3px} 50%{height:12px} }
+@keyframes va-ring { 0%{transform:scale(1) translateZ(0);opacity:0.5} 100%{transform:scale(2.2) translateZ(0);opacity:0} }
+@keyframes va-glow { 0%,100%{box-shadow:0 0 8px rgba(139,92,246,0.2)} 50%{box-shadow:0 0 20px rgba(139,92,246,0.5)} }
+`;
+
 interface Props {
   alert: VoiceAlertType | null;
   onDismiss: () => void;
+}
+
+/* ── Sound wave bars ── */
+function SoundWaveBars() {
+  return (
+    <div className="flex items-center gap-0.5 h-3 ml-1">
+      {[0, 0.15, 0.3, 0.12, 0.25].map((delay, i) => (
+        <span
+          key={i}
+          className="w-0.5 rounded-full bg-primary"
+          style={{ animation: `va-bar 0.6s ${delay}s ease-in-out infinite`, minHeight: 3 }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* ── Siri-like listening rings ── */
+function ListeningRings() {
+  return (
+    <span className="absolute inset-0 flex items-center justify-center pointer-events-none">
+      {[0, 0.6, 1.2].map((delay, i) => (
+        <span
+          key={i}
+          className="absolute w-6 h-6 rounded-full border border-red-400/40"
+          style={{ animation: `va-ring 1.8s ${delay}s ease-out infinite` }}
+        />
+      ))}
+    </span>
+  );
+}
+
+/* ── Typewriter text ── */
+function TypewriterMessage({ text }: { text: string }) {
+  const [reveal, setReveal] = useState(text.length);
+  const prevRef = useRef(text);
+
+  useEffect(() => {
+    if (prevRef.current === text) return;
+    prevRef.current = text;
+    setReveal(0);
+    const len = text.length;
+    const step = Math.max(1, Math.floor(len / 60));
+    let i = 0;
+    const id = setInterval(() => {
+      i += step;
+      if (i >= len) { setReveal(len); clearInterval(id); }
+      else setReveal(i);
+    }, 15);
+    return () => clearInterval(id);
+  }, [text]);
+
+  return (
+    <p className="text-sm text-muted-foreground mb-4">
+      {text.slice(0, reveal)}
+      {reveal < text.length && (
+        <span className="inline-block w-0.5 h-3.5 bg-primary/50 align-middle ml-px animate-pulse" />
+      )}
+    </p>
+  );
 }
 
 export function VoiceAlert({ alert, onDismiss }: Props) {
@@ -33,35 +101,25 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
   const [sttStatus, setSttStatus] = useState<"idle" | "listening" | "processing">("idle");
   const [sttText, setSttText] = useState("");
   const [hasPlayed, setHasPlayed] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const hasAutoPlayed = useRef<string | null>(null);
   const autoDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  /* inject CSS */
+  useEffect(() => {
+    if (document.getElementById(cssId)) return;
+    const s = document.createElement("style");
+    s.id = cssId;
+    s.textContent = css;
+    document.head.appendChild(s);
+  }, []);
+
   // --- STT for permission responses ---
-  const handleSttResult = useCallback(
-    (text: string) => {
-      if (!alert?.require_permission || responding) return;
-
-      setSttText(text);
-      const lower = text.toLowerCase().trim();
-
-      const isApprove = APPROVE_WORDS.some((w) => lower.includes(w));
-      const isDeny = DENY_WORDS.some((w) => lower.includes(w));
-
-      if (isApprove) {
-        setSttStatus("processing");
-        handleResponse(true);
-      } else if (isDeny) {
-        setSttStatus("processing");
-        handleResponse(false);
-      } else {
-        // Didn't match — keep listening
-        setSttStatus("listening");
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [alert, responding]
-  );
+  // Use a ref so the hook can be called with a stable callback that forwards to the real handler
+  // (which needs isListening/stopListening from the hook)
+  const sttResultHandlerRef = useRef<(text: string) => void>(() => {});
 
   const {
     isSupported: sttSupported,
@@ -70,10 +128,39 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     stopListening,
   } = useSpeechRecognition({
     continuous: true,
-    onResult: handleSttResult,
+    onResult: (text) => sttResultHandlerRef.current(text),
     onInterim: (text) => setSttText(text),
     onError: () => setSttStatus("idle"),
   });
+
+  const handleSttResult = useCallback(
+    (text: string) => {
+      if (!alert?.require_permission || responding) return;
+
+      if (errorMessage) setErrorMessage(null);
+
+      const trimmedText = text.trim();
+
+      if (trimmedText) {
+        setSttText(trimmedText);
+        setSttStatus("processing");
+        if (isListening) stopListening();
+
+        const lower = trimmedText.toLowerCase();
+        const isApprove = APPROVE_WORDS.some((w) => lower.includes(w));
+        const isDeny = DENY_WORDS.some((w) => lower.includes(w));
+        const approved = isApprove ? true : isDeny ? false : null;
+        handleResponse(approved, trimmedText);
+      } else {
+        setSttStatus("listening");
+      }
+    },
+    [alert?.require_permission, responding, errorMessage, isListening, stopListening]
+  );
+
+  useEffect(() => {
+    sttResultHandlerRef.current = handleSttResult;
+  }, [handleSttResult]);
 
   // --- Auto-play audio when a new alert arrives ---
   useEffect(() => {
@@ -82,6 +169,8 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
       setSttStatus("idle");
       setSttText("");
       setHasPlayed(false);
+      setErrorMessage(null);
+      setIsPlaying(false);
       if (autoDismissTimer.current) {
         clearTimeout(autoDismissTimer.current);
         autoDismissTimer.current = null;
@@ -89,35 +178,32 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
       return;
     }
 
-    // Only auto-play once per alert
     if (alert.alert_id === hasAutoPlayed.current) return;
     hasAutoPlayed.current = alert.alert_id;
 
     if (alert.audio_base64 && audioRef.current) {
       audioRef.current.src = `data:audio/mpeg;base64,${alert.audio_base64}`;
+      setIsPlaying(true);
       audioRef.current.play().catch(() => {
-        // Browser may block autoplay — user can click Replay
+        setIsPlaying(false);
       });
       setHasPlayed(true);
 
       audioRef.current.onended = () => {
+        setIsPlaying(false);
         if (alert.require_permission && sttSupported) {
-          // Permission alert: start listening for yes/no
           setSttStatus("listening");
           startListening();
         } else if (!alert.require_permission) {
-          // Info-only alert: auto-dismiss after a delay
           autoDismissTimer.current = setTimeout(() => {
             onDismiss();
           }, AUTO_DISMISS_DELAY);
         }
       };
     } else if (alert.require_permission && sttSupported) {
-      // No audio but permission needed — start STT immediately
       setSttStatus("listening");
       startListening();
     } else if (!alert.require_permission && !alert.audio_base64) {
-      // No audio, no permission — auto-dismiss after short delay
       autoDismissTimer.current = setTimeout(() => {
         onDismiss();
       }, AUTO_DISMISS_DELAY);
@@ -137,32 +223,51 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
 
   const replayAudio = () => {
     if (alert.audio_base64 && audioRef.current) {
-      // Cancel any pending auto-dismiss
       if (autoDismissTimer.current) {
         clearTimeout(autoDismissTimer.current);
         autoDismissTimer.current = null;
       }
       audioRef.current.src = `data:audio/mpeg;base64,${alert.audio_base64}`;
+      setIsPlaying(true);
       audioRef.current.play();
+      if (audioRef.current) {
+        audioRef.current.onended = () => setIsPlaying(false);
+      }
     }
   };
 
-  const handleResponse = async (approved: boolean) => {
+  const handleResponse = async (approved: boolean | null, userText: string = "") => {
     setResponding(true);
     if (isListening) stopListening();
     setSttStatus("processing");
+    setErrorMessage(null); // Clear any previous error
 
     try {
-      await apiFetch("/voice/permission", {
+      const response = await apiFetch("/voice/permission", {
         method: "POST",
         body: JSON.stringify({
           alert_id: alert.alert_id,
-          approved,
+          approved: approved, // Can be null if inferred from userText
+          user_text: userText || sttText, // Send the natural language response
           modifications: {},
         }),
       });
+      
+      // Check if there's an error message from clarity check
+      if (response.error_message) {
+        setErrorMessage(response.error_message);
+        setSttStatus("idle");
+        setSttText("");
+        // Don't dismiss - let user see the error and try again
+        setResponding(false);
+        return;
+      }
     } catch (e) {
       console.error("Permission response failed:", e);
+      setErrorMessage("Failed to process your response. Please try again.");
+      setSttStatus("idle");
+      setResponding(false);
+      return;
     }
     setResponding(false);
     setSttStatus("idle");
@@ -180,13 +285,20 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
     }
   };
 
+  const needsPermGlow = alert.require_permission;
+
   return (
     <AnimatePresence>
       <motion.div
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        initial={{ opacity: 0, scale: 0.8, y: 30 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="fixed bottom-6 right-6 z-50 w-96 bg-card border border-border rounded-xl shadow-2xl overflow-hidden"
+        exit={{ opacity: 0, scale: 0.9, y: 20 }}
+        transition={{ type: "spring", stiffness: 400, damping: 30 }}
+        className="fixed right-4 left-4 sm:left-auto sm:right-6 z-50 sm:w-96 bg-card border border-border rounded-xl shadow-2xl overflow-hidden backdrop-blur-sm max-h-[85vh] overflow-y-auto"
+        style={{
+          bottom: "calc(1rem + env(safe-area-inset-bottom, 0px))",
+          ...(needsPermGlow ? { animation: "va-glow 2s ease-in-out infinite" } : {}),
+        }}
       >
         <div className="p-4">
           {/* Header */}
@@ -194,9 +306,11 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
             <motion.div
               animate={{ scale: [1, 1.2, 1] }}
               transition={{ repeat: Infinity, duration: 2 }}
+              className="relative"
             >
               <Volume2 className="w-5 h-5 text-primary" />
             </motion.div>
+            {isPlaying && <SoundWaveBars />}
             <span className="text-sm font-semibold">
               {alert.require_permission ? "Voice Alert" : "Smart Home"}
             </span>
@@ -204,17 +318,21 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
               <motion.span
                 animate={{ opacity: [1, 0.4] }}
                 transition={{ repeat: Infinity, duration: 0.8 }}
-                className="ml-auto text-[10px] text-red-400 flex items-center gap-1"
+                className="ml-auto text-[10px] text-red-400 flex items-center gap-1 relative"
               >
-                <Mic className="w-3 h-3" /> Listening…
+                <span className="relative">
+                  <Mic className="w-3 h-3 relative z-10" />
+                  <ListeningRings />
+                </span>
+                Listening…
               </motion.span>
             )}
           </div>
 
-          {/* Alert message */}
-          <p className="text-sm text-muted-foreground mb-4">{alert.message}</p>
+          {/* Alert message — typewriter */}
+          <TypewriterMessage text={alert.message} />
 
-          {/* Replay button — only shown when audio exists and has been played */}
+          {/* Replay button */}
           {alert.audio_base64 && hasPlayed && (
             <Button variant="outline" size="sm" className="mb-3 w-full" onClick={replayAudio}>
               <RotateCcw className="w-3.5 h-3.5 mr-1.5" /> Replay
@@ -268,7 +386,6 @@ export function VoiceAlert({ alert, onDismiss }: Props) {
                 </Button>
               </div>
 
-              {/* STT toggle — in case auto-listen didn't start or user wants to retry */}
               {sttSupported && (
                 <Button
                   variant="outline"

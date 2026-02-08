@@ -61,4 +61,9 @@ class ThreatAssessment(BaseModel):
 
     def requires_user_permission(self) -> bool:
         """Whether this threat level requires user approval before acting."""
-        return self.threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL)
+        # Handle both enum and string values
+        if hasattr(self.threat_level, 'value'):
+            return self.threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL)
+        else:
+            threat_level_str = str(self.threat_level).lower()
+            return threat_level_str in ('high', 'critical')

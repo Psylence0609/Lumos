@@ -58,8 +58,26 @@ Respond with ONLY valid JSON:
 
 Only include patterns with 2+ occurrences. Be specific about device IDs."""
 
-# Prompt for parsing a user's natural language preference into a structured pattern
-PREFERENCE_PARSING_PROMPT = """You are parsing a user's smart home preference into a structured automation rule.
+# ---------------------------------------------------------------------------
+# Dynamic prompt builders — pull action reference & critical devices from registry
+# ---------------------------------------------------------------------------
+
+def _critical_devices_text() -> str:
+    """Return a dynamic critical-device warning for prompts."""
+    from src.devices.registry import device_registry
+    ids = device_registry.build_critical_devices_text()
+    return (
+        f"CRITICAL-priority devices ({ids}) must NEVER be turned off.\n"
+        "Sensors are read-only — NEVER include them in actions."
+    )
+
+
+def _build_preference_parsing_prompt(device_inventory: str, user_message: str) -> str:
+    from src.devices.registry import device_registry
+    action_ref = device_registry.build_action_reference()
+    critical = _critical_devices_text()
+
+    return f"""You are parsing a user's smart home preference into a structured automation rule.
 
 AVAILABLE DEVICES (with priority tiers):
 {device_inventory}
@@ -85,18 +103,11 @@ TRIGGER TYPES (pick the best one and fill in relevant fields):
   The description MUST start with "NEVER" or "DON'T" to indicate this is a prohibition.
 
 CRITICAL SAFETY RULES:
-- NEVER include actions to turn off CRITICAL-priority devices (fridge plug, battery, sensors, locks — unless user explicitly asks to lock/unlock)
-- When the user says "turn off unnecessary appliances" or similar, only target LOW-priority and MEDIUM-priority devices
-- The fridge (plug_kitchen_fridge) is ALWAYS critical — NEVER turn it off
-- Sensors are read-only — NEVER include them in actions
+{critical}
+- When the user says "turn off unnecessary appliances" or similar, only target LOW-priority and MEDIUM-priority devices.
 
 DEVICE ACTION REFERENCE:
-- light: "on" (params: {{"brightness": 0-100}}), "off", "dim" (params: {{"brightness": 0-100}})
-- thermostat: "set_temperature" (params: {{"temperature": 60-85}}), "set_mode" (params: {{"mode": "heat|cool|auto|eco|off"}})
-- smart_plug: "on", "off"
-- lock: "lock", "unlock"
-- coffee_maker: "on" (standby), "brew" (params: {{"strength": "light|medium|strong"}}), "off"
-- battery: "set_mode" (params: {{"mode": "charge|discharge|auto|backup"}})
+{action_ref}
 
 Respond with ONLY valid JSON:
 {{
@@ -109,8 +120,21 @@ Respond with ONLY valid JSON:
     ]
 }}"""
 
-# Prompt for UPDATING an existing pattern when user refines it
-PREFERENCE_UPDATE_PROMPT = """You are updating an existing smart home automation pattern based on a new instruction from the user.
+
+def _build_preference_update_prompt(
+    existing_name: str,
+    existing_description: str,
+    existing_trigger_type: str,
+    existing_trigger_value: str,
+    existing_actions: str,
+    device_inventory: str,
+    user_message: str,
+) -> str:
+    from src.devices.registry import device_registry
+    action_ref = device_registry.build_action_reference()
+    critical = _critical_devices_text()
+
+    return f"""You are updating an existing smart home automation pattern based on a new instruction from the user.
 
 EXISTING PATTERN:
   Name: {existing_name}
@@ -132,16 +156,10 @@ Your task: Merge the user's new instruction with the existing pattern.
 - Update the display_name and description to reflect the merged result.
 
 CRITICAL SAFETY RULES:
-- NEVER include actions to turn off CRITICAL-priority devices (fridge plug, battery, sensors)
-- The fridge (plug_kitchen_fridge) is ALWAYS critical — NEVER turn it off
+{critical}
 
 DEVICE ACTION REFERENCE:
-- light: "on" (params: {{"brightness": 0-100}}), "off", "dim" (params: {{"brightness": 0-100}})
-- thermostat: "set_temperature" (params: {{"temperature": 60-85}}), "set_mode" (params: {{"mode": "heat|cool|auto|eco|off"}})
-- smart_plug: "on", "off"
-- lock: "lock", "unlock"
-- coffee_maker: "on" (standby), "brew" (params: {{"strength": "light|medium|strong"}}), "off"
-- battery: "set_mode" (params: {{"mode": "charge|discharge|auto|backup"}})
+{action_ref}
 
 Respond with ONLY valid JSON:
 {{
@@ -309,7 +327,7 @@ class PatternDetectorAgent(BaseAgent):
         try:
             # Step 1: Parse the new preference
             result = await llm_client.chat_json(
-                messages=[{"role": "user", "content": PREFERENCE_PARSING_PROMPT.format(
+                messages=[{"role": "user", "content": _build_preference_parsing_prompt(
                     device_inventory=device_inventory,
                     user_message=user_message,
                 )}],
@@ -353,14 +371,14 @@ class PatternDetectorAgent(BaseAgent):
         description = parsed.get("description", user_message)
         actions_data = parsed.get("actions", [])
 
-        # Filter out actions targeting critical devices (safety net)
-        CRITICAL_DEVICE_IDS = {"plug_kitchen_fridge", "battery_main"}
+        # Filter out actions targeting critical devices (safety net — dynamically from registry)
+        from src.devices.registry import device_registry
+        critical_ids = device_registry.get_critical_device_ids()
         actions = []
         for a in actions_data:
             did = a.get("device_id", "")
             act = a.get("action", "")
-            # Never turn off fridge
-            if did in CRITICAL_DEVICE_IDS and act == "off":
+            if did in critical_ids and act == "off":
                 logger.warning(f"Blocked critical device action in pattern: {did}.{act}")
                 continue
             try:
@@ -436,7 +454,7 @@ class PatternDetectorAgent(BaseAgent):
             for a in existing.action_sequence
         ) or "    (none)"
 
-        prompt = PREFERENCE_UPDATE_PROMPT.format(
+        prompt = _build_preference_update_prompt(
             existing_name=existing.display_name,
             existing_description=existing.description,
             existing_trigger_type=existing.trigger_conditions.get("type", ""),
@@ -459,13 +477,14 @@ class PatternDetectorAgent(BaseAgent):
         new_display_name = result.get("display_name", existing.display_name)
         new_description = result.get("description", existing.description)
 
-        # Filter out critical device shutoffs
-        CRITICAL_DEVICE_IDS = {"plug_kitchen_fridge", "battery_main"}
+        # Filter out critical device shutoffs (dynamically from registry)
+        from src.devices.registry import device_registry
+        critical_ids = device_registry.get_critical_device_ids()
         new_actions = []
         for a in new_actions_data:
             did = a.get("device_id", "")
             act = a.get("action", "")
-            if did in CRITICAL_DEVICE_IDS and act == "off":
+            if did in critical_ids and act == "off":
                 logger.warning(f"Blocked critical device action in merge: {did}.{act}")
                 continue
             try:
