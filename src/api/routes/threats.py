@@ -9,13 +9,18 @@ from src.agents.threat_assessment import threat_agent
 router = APIRouter(prefix="/threats", tags=["threats"])
 
 
+def _get_enum_str(val):
+    """Safely extract string value from enum or string."""
+    return val.value if hasattr(val, 'value') else str(val)
+
+
 @router.get("/current")
 async def get_current_threat() -> dict[str, Any]:
     """Get the latest threat assessment."""
     assessment = threat_agent.latest_assessment
     return {
-        "threat_level": assessment.threat_level.value,
-        "threat_type": assessment.threat_type.value,
+        "threat_level": _get_enum_str(assessment.threat_level),
+        "threat_type": _get_enum_str(assessment.threat_type),
         "urgency_score": assessment.urgency_score,
         "summary": assessment.summary,
         "reasoning": assessment.reasoning,
@@ -58,7 +63,7 @@ async def trigger_assessment() -> dict[str, Any]:
     """Manually trigger a new threat assessment."""
     assessment = await threat_agent.run()
     return {
-        "threat_level": assessment.threat_level.value,
-        "threat_type": assessment.threat_type.value,
+        "threat_level": _get_enum_str(assessment.threat_level),
+        "threat_type": _get_enum_str(assessment.threat_type),
         "summary": assessment.summary,
     }

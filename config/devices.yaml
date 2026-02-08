@@ -191,6 +191,19 @@ rooms:
         priority_tier: "critical"
         negotiation_flexibility: 0.0
 
+  utility_room:
+    display_name: "Utility Room"
+    devices:
+      - id: "water_heater_main"
+        type: "water_heater"
+        display_name: "Water Heater"
+        capabilities: ["heat", "boost", "standby", "set_temperature", "status"]
+        energy_profile:
+          idle_watts: 50.0
+          active_watts: 4500.0
+        priority_tier: "high"
+        negotiation_flexibility: 0.3
+
   energy_system:
     display_name: "Energy System"
     devices:

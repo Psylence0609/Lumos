@@ -132,14 +132,21 @@ class ThreatAssessmentAgent(BaseAgent):
             assessment = await self._analyze_threats(self._weather_data, self._ercot_data)
             self._latest_assessment = assessment
 
+            # Helper to safely get string value from enum or string
+            def _get_enum_str(val):
+                return val.value if hasattr(val, 'value') else str(val)
+
+            threat_level_str = _get_enum_str(assessment.threat_level)
+            threat_type_str = _get_enum_str(assessment.threat_type)
+
             # Log event
             await event_store.log_event(Event(
                 event_id=str(uuid.uuid4())[:8],
                 event_type=EventType.THREAT_ASSESSMENT,
                 source=self.agent_id,
                 data={
-                    "threat_level": assessment.threat_level.value,
-                    "threat_type": assessment.threat_type.value,
+                    "threat_level": threat_level_str,
+                    "threat_type": threat_type_str,
                     "summary": assessment.summary,
                     "urgency_score": assessment.urgency_score,
                 },
@@ -147,8 +154,8 @@ class ThreatAssessmentAgent(BaseAgent):
 
             # Publish to MQTT
             await mqtt_client.publish(Topics.THREAT_ASSESSMENT, {
-                "threat_level": assessment.threat_level.value,
-                "threat_type": assessment.threat_type.value,
+                "threat_level": threat_level_str,
+                "threat_type": threat_type_str,
                 "urgency_score": assessment.urgency_score,
                 "summary": assessment.summary,
                 "reasoning": assessment.reasoning,
@@ -165,18 +172,42 @@ class ThreatAssessmentAgent(BaseAgent):
                 },
             })
 
-            # Broadcast to WebSocket
+            # Broadcast to WebSocket (reuse threat_level_str and threat_type_str from above)
             await ws_manager.broadcast("threat_assessment", {
-                "threat_level": assessment.threat_level.value,
-                "threat_type": assessment.threat_type.value,
+                "threat_level": threat_level_str,
+                "threat_type": threat_type_str,
                 "urgency_score": assessment.urgency_score,
                 "summary": assessment.summary,
                 "reasoning": assessment.reasoning,
                 "recommended_actions": assessment.recommended_actions,
             })
 
+            # Automatically trigger orchestrator for HIGH/CRITICAL threats
+            # This ensures voice alerts and permission requests happen immediately
+            # Check if threat_level is HIGH or CRITICAL (handle both enum and string)
+            is_high_or_critical = False
+            if hasattr(assessment.threat_level, 'value'):
+                is_high_or_critical = assessment.threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL)
+                logger.debug(f"Threat level check (enum): {assessment.threat_level} -> {is_high_or_critical}")
+            else:
+                threat_level_lower = str(assessment.threat_level).lower()
+                is_high_or_critical = threat_level_lower in ('high', 'critical')
+                logger.debug(f"Threat level check (string): {threat_level_lower} -> {is_high_or_critical}")
+
+            if is_high_or_critical:
+                logger.info(f"Triggering orchestrator for {threat_level_str} threat: {assessment.summary}")
+                try:
+                    from src.agents.orchestrator import orchestrator
+                    # Trigger orchestrator to handle the threat (voice alert + permission)
+                    await orchestrator.handle_threat_assessment(assessment)
+                    logger.info("Orchestrator threat handling completed")
+                except Exception as e:
+                    logger.error(f"Failed to trigger orchestrator for threat: {e}", exc_info=True)
+            else:
+                logger.debug(f"Threat level {threat_level_str} is not HIGH/CRITICAL, skipping orchestrator trigger")
+
             self._record_action(
-                action=f"Assessment: {assessment.threat_level.value} - {assessment.threat_type.value}",
+                action=f"Assessment: {threat_level_str} - {threat_type_str}",
                 reasoning=assessment.reasoning[:500],
             )
 
@@ -290,13 +321,18 @@ class ThreatAssessmentAgent(BaseAgent):
 
         # Grid strain check
         if ercot.load_capacity_pct > 95:
-            threat_level = max(threat_level, ThreatLevel.CRITICAL, key=lambda x: x.value)
+            # Compare threat levels: CRITICAL > HIGH > MEDIUM > LOW > NONE
+            threat_level_order = {ThreatLevel.NONE: 0, ThreatLevel.LOW: 1, ThreatLevel.MEDIUM: 2, ThreatLevel.HIGH: 3, ThreatLevel.CRITICAL: 4}
+            if threat_level_order.get(threat_level, 0) < threat_level_order[ThreatLevel.CRITICAL]:
+                threat_level = ThreatLevel.CRITICAL
             threat_type = ThreatType.GRID_STRAIN
             urgency = max(urgency, 0.95)
             actions.extend(["reduce_consumption", "switch_to_battery"])
             reasons.append(f"Grid at {ercot.load_capacity_pct}% capacity")
         elif ercot.load_capacity_pct > 85:
-            if threat_level.value < ThreatLevel.HIGH.value:
+            # Compare threat levels: only upgrade if current is below HIGH
+            threat_level_order = {ThreatLevel.NONE: 0, ThreatLevel.LOW: 1, ThreatLevel.MEDIUM: 2, ThreatLevel.HIGH: 3, ThreatLevel.CRITICAL: 4}
+            if threat_level_order.get(threat_level, 0) < threat_level_order[ThreatLevel.HIGH]:
                 threat_level = ThreatLevel.HIGH
                 threat_type = ThreatType.GRID_STRAIN
             urgency = max(urgency, 0.7)

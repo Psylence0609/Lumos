@@ -15,20 +15,70 @@ from src.api.websocket import ws_manager
 
 logger = logging.getLogger(__name__)
 
-# Mapping of technical action names to human-readable descriptions (fallback)
-ACTION_DESCRIPTIONS: dict[str, str] = {
-    "pre_cool_home": "pre-cool the house to a comfortable temperature before the heat peaks",
-    "pre_cool": "pre-cool the house before the heat peaks",
-    "charge_battery": "charge the home battery to prepare for high demand",
-    "switch_to_battery": "switch to battery backup power",
-    "close_blinds": "close the blinds and dim the lights to reduce solar heat gain",
-    "reduce_non_essential": "turn off non-essential devices to conserve energy",
-    "reduce_consumption": "reduce overall energy consumption",
-    "set_eco_mode": "switch thermostats to energy-saving eco mode",
-    "increase_heating": "increase heating to keep the house warm and protect the pipes",
-    "defer_high_energy_tasks": "delay any high-energy tasks until prices drop",
-    "insulate_pipes_alert": "check that exposed pipes are insulated against freezing",
-}
+def _build_action_descriptions() -> dict[str, str]:
+    """Build a human-readable action descriptions map dynamically.
+
+    Combines device-level actions from the schema with higher-level
+    threat-response action phrases.  The device-level entries are
+    auto-generated so they stay in sync with DEVICE_TYPE_ACTIONS.
+    """
+    from src.models.device import DEVICE_TYPE_ACTIONS
+
+    descs: dict[str, str] = {}
+
+    # Auto-generated device-level descriptions
+    _FRIENDLY: dict[str, dict[str, str]] = {
+        "light": {"on": "turn on the lights", "off": "turn off the lights", "dim": "dim the lights"},
+        "thermostat": {
+            "set_temperature": "adjust the thermostat temperature",
+            "set_mode": "change the thermostat mode",
+            "eco_mode": "switch the thermostat to eco mode",
+        },
+        "smart_plug": {"on": "turn on the smart plug", "off": "turn off the smart plug"},
+        "lock": {"lock": "lock the door", "unlock": "unlock the door"},
+        "coffee_maker": {"brew": "brew coffee", "off": "turn off the coffee maker", "on": "switch on the coffee maker", "keep_warm": "keep the coffee warm"},
+        "battery": {"set_mode": "adjust the home battery mode"},
+        "water_heater": {"heat": "heat the water", "boost": "boost the water heater", "standby": "set the water heater to standby", "off": "turn off the water heater"},
+    }
+
+    for type_key, actions in DEVICE_TYPE_ACTIONS.items():
+        # DEVICE_TYPE_ACTIONS is dict[str, list[dict[str, Any]]]
+        # type_key is already a string (e.g., "light", "thermostat")
+        # actions is a list of dicts with "action" and "params" keys
+        for action_dict in actions:
+            action_name = action_dict["action"]  # Extract action name from dict
+            key = f"{type_key}_{action_name}"
+            friendly = _FRIENDLY.get(type_key, {}).get(action_name, f"{action_name} the {type_key}".replace("_", " "))
+            descs[key] = friendly
+            descs[action_name] = friendly  # also allow bare action name
+
+    # Higher-level threat-response phrases (not tied to a single device)
+    descs.update({
+        "pre_cool_home": "pre-cool the house before the heat peaks",
+        "pre_cool": "pre-cool the house before the heat peaks",
+        "charge_battery": "charge the home battery to prepare for high demand",
+        "switch_to_battery": "switch to battery backup power",
+        "close_blinds": "close the blinds and dim the lights to reduce solar heat gain",
+        "reduce_non_essential": "turn off non-essential devices to conserve energy",
+        "reduce_consumption": "reduce overall energy consumption",
+        "set_eco_mode": "switch thermostats to energy-saving eco mode",
+        "increase_heating": "increase heating to keep the house warm and protect the pipes",
+        "defer_high_energy_tasks": "delay any high-energy tasks until prices drop",
+        "insulate_pipes_alert": "check that exposed pipes are insulated against freezing",
+    })
+
+    return descs
+
+
+# Lazy-initialised once at first use
+_ACTION_DESCRIPTIONS: dict[str, str] | None = None
+
+
+def _get_action_descriptions() -> dict[str, str]:
+    global _ACTION_DESCRIPTIONS
+    if _ACTION_DESCRIPTIONS is None:
+        _ACTION_DESCRIPTIONS = _build_action_descriptions()
+    return _ACTION_DESCRIPTIONS
 
 SCRIPT_GENERATION_PROMPT = """You are a friendly smart home assistant speaking to the homeowner.
 Convert the following technical threat information into a natural, conversational voice message.
@@ -93,14 +143,15 @@ class VoiceAgent(BaseAgent):
 
         Falls back to a template-based approach if LLM fails.
         """
-        # Convert technical action names to human-readable
+        # Convert technical action names to human-readable (dynamic lookup)
+        descriptions = _get_action_descriptions()
         actions_readable = []
         for action in actions:
             action_lower = action.lower().replace(" ", "_")
-            desc = ACTION_DESCRIPTIONS.get(action_lower)
+            desc = descriptions.get(action_lower)
             if not desc:
                 # Try partial match
-                for key, val in ACTION_DESCRIPTIONS.items():
+                for key, val in descriptions.items():
                     if key in action_lower or action_lower in key:
                         desc = val
                         break

@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import {
   Lightbulb, Thermometer, Lock, Battery, Coffee, Activity,
-  Plug, LockOpen, Power
+  Plug, LockOpen, Power, Droplets
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ const DEVICE_ICONS: Record<string, any> = {
   coffee_maker: Coffee,
   sensor: Activity,
   smart_plug: Plug,
+  water_heater: Droplets,
 };
 
 interface Props {
@@ -114,6 +115,13 @@ export function DeviceCard({ device, onUpdate }: Props) {
             )}
             {device.device_type === "coffee_maker" && device.properties.brewing && (
               <p className="text-[10px] text-yellow-400">Brewing...</p>
+            )}
+            {device.device_type === "water_heater" && (
+              <p className="text-[10px] text-muted-foreground">
+                {device.properties.temperature_f?.toFixed(0)}°F
+                {device.properties.heating && <span className="text-orange-400 ml-1">Heating</span>}
+                {device.properties.mode === "boost" && <span className="text-red-400 ml-1">Boost</span>}
+              </p>
             )}
             <p className="text-[10px] text-zinc-600">{formatWatts(device.current_watts)}</p>
           </div>

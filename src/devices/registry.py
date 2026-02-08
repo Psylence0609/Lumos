@@ -1,4 +1,10 @@
-"""Device registry: loads devices from YAML config and manages lifecycle."""
+"""Device registry: loads devices from YAML config and manages lifecycle.
+
+Also provides helper methods that dynamically derive information from the
+registered devices — critical-device sets, action references for LLM prompts,
+non-essential device lists, etc.  This avoids hardcoding device IDs or
+capability text across multiple agents.
+"""
 
 import logging
 from pathlib import Path
@@ -14,7 +20,14 @@ from src.devices.lock import LockDevice
 from src.devices.sensor import SensorDevice
 from src.devices.smart_plug import SmartPlugDevice
 from src.devices.thermostat import ThermostatDevice
-from src.models.device import DeviceConfig, DeviceType, EnergyProfile, PriorityTier
+from src.devices.water_heater import WaterHeaterDevice
+from src.models.device import (
+    DeviceConfig,
+    DeviceType,
+    EnergyProfile,
+    PriorityTier,
+    build_action_reference_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +40,7 @@ DEVICE_CLASS_MAP: dict[DeviceType, type[BaseDevice]] = {
     DeviceType.COFFEE_MAKER: CoffeeMakerDevice,
     DeviceType.SENSOR: SensorDevice,
     DeviceType.SMART_PLUG: SmartPlugDevice,
+    DeviceType.WATER_HEATER: WaterHeaterDevice,
 }
 
 
@@ -155,6 +169,81 @@ class DeviceRegistry:
             "battery_mode": battery_mode,
             "net_grid_watts": round(total_consumption - solar_generation, 1),
         }
+
+    # ------------------------------------------------------------------
+    # Dynamic helpers for agents and prompts
+    # ------------------------------------------------------------------
+
+    def get_critical_device_ids(self) -> set[str]:
+        """Return device IDs with CRITICAL priority — must never be turned off.
+
+        Derived from ``priority_tier: critical`` in devices.yaml so adding a
+        new critical device only requires a config change.
+        """
+        return {
+            d.device_id
+            for d in self._devices.values()
+            if d.state.priority_tier == PriorityTier.CRITICAL
+        }
+
+    def get_non_essential_devices(
+        self,
+        *,
+        exclude_types: set[DeviceType] | None = None,
+        include_medium: bool = False,
+    ) -> list[BaseDevice]:
+        """Return powered-on devices with LOW/OPTIONAL priority.
+
+        Args:
+            exclude_types: Device types to always skip (defaults to sensor,
+                           battery, lock).
+            include_medium: Also include MEDIUM-priority devices.
+        """
+        skip_types = exclude_types or {
+            DeviceType.SENSOR,
+            DeviceType.BATTERY,
+            DeviceType.LOCK,
+        }
+        tiers = {PriorityTier.LOW, PriorityTier.OPTIONAL}
+        if include_medium:
+            tiers.add(PriorityTier.MEDIUM)
+
+        return [
+            d
+            for d in self._devices.values()
+            if d.state.priority_tier in tiers
+            and d.device_type not in skip_types
+            and d.state.power
+        ]
+
+    def get_first_device_of_type(
+        self, device_type: DeviceType, room: str | None = None
+    ) -> BaseDevice | None:
+        """Return the first device matching *device_type* (optionally in *room*)."""
+        for d in self._devices.values():
+            if d.device_type == device_type:
+                if room is None or d.state.room == room:
+                    return d
+        return None
+
+    def build_action_reference(self) -> str:
+        """Build the device action reference block for LLM prompts.
+
+        Delegates to the centralized schema in ``src.models.device``.
+        """
+        return build_action_reference_text()
+
+    def build_critical_devices_text(self) -> str:
+        """Build a human-readable list of critical devices for LLM prompts."""
+        critical = self.get_critical_device_ids()
+        if not critical:
+            return "No critical devices configured."
+        parts = []
+        for did in sorted(critical):
+            device = self._devices.get(did)
+            name = device.display_name if device else did
+            parts.append(f"{did} ({name})")
+        return ", ".join(parts)
 
 
 # Singleton
