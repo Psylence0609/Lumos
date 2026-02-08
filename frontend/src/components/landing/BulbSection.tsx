@@ -17,36 +17,58 @@ export function BulbSection({ containerRef }: BulbSectionProps) {
     const lamp = lampRef.current;
     if (!container || !target || !lamp) return;
 
-    // Roll from left to center (onScroll triggers when section enters view)
-    const rollIn = animate(
-      lamp,
-      {
-        x: ["-15rem", "0"],
-        rotate: "1turn",
-        duration: 2000,
-        ease: "outQuad",
-        autoplay: onScroll({ container, target, axis: "y", enter: 0.2 }),
-      }
-    );
+    const duration = 2000;
+    // Roll starts when section enters view (0%) and completes at 20%
+    // Stays centered 20%-80%, then scrolls away
+    const ROLL_START = 0;
+    const ROLL_END = 0.2;
+    const STAY_END = 0.8;
 
-    return () => {
-      rollIn.cancel();
-      return;
-    };
-  }, [containerRef]);
-
-  // Light-up glow after lamp section has entered
-  useEffect(() => {
-    const container = containerRef.current;
-    const target = sectionRef.current;
-    const glow = glowRef.current;
-    if (!container || !target || !glow) return;
+    const rollIn = animate(lamp, {
+      x: ["15rem", "0"], // Right to center
+      rotate: "-1turn", // Roll counterclockwise from right
+      duration,
+      ease: "outQuad",
+      autoplay: false,
+    });
 
     const observer = onScroll({
       container,
       target,
       axis: "y",
-      enter: 0.2,
+      enter: 0, // Start observing when section just enters viewport
+      onUpdate: (obs) => {
+        // obs.progress goes from 0 (section enters) to 1 (section exits)
+        const scrollP = Math.max(0, Math.min(1, obs.progress));
+
+        if (scrollP <= ROLL_END) {
+          // Rolling in phase (0% to 20% of section scroll)
+          const rollP = scrollP / ROLL_END;
+          rollIn.seek(rollP * duration);
+        } else {
+          // Stay centered phase (20% onwards)
+          rollIn.seek(duration); // Keep at end position
+        }
+      },
+    });
+
+    return () => {
+      observer.revert();
+      rollIn.cancel();
+    };
+  }, [containerRef]);
+
+  // Light-up glow after lamp rolls in
+  useEffect(() => {
+    const container = containerRef.current;
+    const target = sectionRef.current;
+    if (!container || !target) return;
+
+    const observer = onScroll({
+      container,
+      target,
+      axis: "y",
+      enter: 0.15, // Trigger when 15% into the section (near end of roll)
       onEnter: () => setHasEntered(true),
     });
 
@@ -61,7 +83,7 @@ export function BulbSection({ containerRef }: BulbSectionProps) {
     const anim = animate(glow, {
       opacity: [0, 0.9],
       duration: 800,
-      delay: 600,
+      delay: 400,
       ease: "outQuad",
     });
     return () => {
@@ -73,18 +95,20 @@ export function BulbSection({ containerRef }: BulbSectionProps) {
     <section
       ref={sectionRef}
       className="min-h-screen flex items-center justify-center bg-background px-4"
+      style={{ minHeight: "300vh" }}
     >
       <div
         ref={lampRef}
-        className="relative flex justify-center items-end"
-        style={{ transform: "translateX(-15rem)" }}
+        className="relative flex justify-center items-end sticky top-1/2 -translate-y-1/2"
+        style={{ transform: "translateX(15rem) translateY(-50%)" }}
       >
-        {/* Glow pool under lamp (lights up after bounce) */}
+        {/* Glow pool under lamp (lights up after roll) */}
         <div
           ref={glowRef}
           className="absolute bottom-0 left-1/2 -translate-x-1/2 w-48 h-16 rounded-full opacity-0"
           style={{
-            background: "radial-gradient(ellipse 80% 50% at 50% 100%, rgba(250,204,21,0.4) 0%, transparent 70%)",
+            background:
+              "radial-gradient(ellipse 80% 50% at 50% 100%, rgba(250,204,21,0.4) 0%, transparent 70%)",
             filter: "blur(8px)",
           }}
         />
@@ -121,14 +145,6 @@ function DeskLampSvg() {
           <feMerge>
             <feMergeNode in="glow" />
             <feMergeNode in="SourceGraphic" />
-          </feMerge>
-        </filter>
-        <filter id="lamp-glow-ambient" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="12" result="blur" />
-          <feFlood floodColor="rgba(250, 204, 21, 0.25)" floodOpacity="1" result="c" />
-          <feComposite in="c" in2="blur" operator="in" result="ambient" />
-          <feMerge>
-            <feMergeNode in="ambient" />
           </feMerge>
         </filter>
       </defs>
